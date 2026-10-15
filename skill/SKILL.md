@@ -75,29 +75,24 @@ flowmap impact --symbols "StartDeposit"
 
 ---
 
-### Workflow 3: Post-Edit Regression & Behavioral Diff Check ("Did I Break Anything?")
+### Workflow 3: Feature Branch Behavioral Delta & PR Blast Radius (`flowmap delta`)
 
-After writing code or implementing a feature, verify whether behavior broke or regressed:
+When finishing work on a feature branch (`feature/x`), verify behavioral gaps and generate a PR summary:
 
-1. **Re-extract the Modified Service into a temporary folder:**
+1. **Run Git-Native Delta Analysis:**
    ```bash
-   flowmap extract --lang <csharp|rust> --project <dir> --out flows/current
+   flowmap delta --against main --pr
    ```
-2. **Build the current graph:**
-   ```bash
-   flowmap build --flows-dir flows/current --out current.json
-   ```
-3. **Run Behavioral Diff against Baseline:**
-   ```bash
-   flowmap diff baseline.json current.json
-   ```
-   - Check if any previously existing outcomes (`200 OK`, `400 ValidationProblem`, etc.) were accidentally dropped.
-   - Check if any security guards (`[Authorize]`, `[RequireFeature]`) were removed.
-   - Check if any expected DB writes or domain events disappeared.
+   The engine automatically:
+   - Retrieves the baseline map from `main` in memory without switching branches or stashing.
+   - Scans the active feature branch and identifies added, modified, and removed flows.
+   - Detects **Architectural & Security Hazards**: unconsumed domain events (dead topics), dropped authorization guards, and removed HTTP outcomes.
+   - Computes **Secondary Blast Radius**: all existing flows coupled via shared DB tables or events.
+   - Generates `<repo>/flows/PR_DELTA.md` ready to paste into GitHub/GitLab pull requests.
 
-4. **Run Audit Check:**
+2. **Run Strict CI/CD Check:**
    ```bash
-   flowmap check --map current.json --strict
+   flowmap delta --against main --strict
    ```
 
 ---

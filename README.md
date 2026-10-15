@@ -119,15 +119,32 @@ flowmap impact --files "Quote.cs"
 flowmap impact --symbols "StartDeposit"
 ```
 
-### 3. Post-Edit Regression Diff ("Did I Break Anything?")
-Verify behavioral fidelity after refactoring:
+```
+
+### 3. Feature Branch Behavioral Delta & PR Blast Radius (`flowmap delta`)
+When finishing work on a feature branch (`feature/x`), instantly detect behavioral gaps, missing guards, unconsumed events, and secondary blast radius against your base branch without switching branches:
 
 ```bash
-# Compare a baseline graph against a newly extracted graph
+# Compare current working tree against main (zero checkout, git-native)
+flowmap delta --against main
+
+# Generate a Pull Request Markdown report ready for GitHub/GitLab PR descriptions
+flowmap delta --against main --pr
+
+# Generate an interactive visual delta explorer
+flowmap delta --against main --html
+
+# CI/CD Gate: Fail build if breaking behavioral changes or critical hazards exist
+flowmap delta --against main --strict
+```
+
+### 4. Low-Level FlowMap File Diff
+```bash
+# Compare two specific flowmap JSON datasets
 flowmap diff baseline.json current.json
 ```
 
-### 4. Querying Coupled State & Events
+### 5. Querying Coupled State & Events
 
 ```bash
 # What flows touch this DB table?

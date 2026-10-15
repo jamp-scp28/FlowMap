@@ -345,9 +345,180 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+
+        Commands::Delta {
+            against,
+            flows_dir,
+            current,
+            baseline,
+            pr,
+            html,
+            strict,
+        } => {
+            println!("{}", "Computing Behavioral Delta & Blast Radius...".bold().bright_blue());
+
+            // 1. Load or scan current flowmap
+            let curr_map = if let Some(curr_path) = current {
+                load_connected_map(&curr_path)?
+            } else {
+                let flows_path = Path::new(&flows_dir).join("flowmap.json");
+                if flows_path.exists() {
+                    load_connected_map(&flows_path)?
+                } else {
+                    println!("No flowmap.json found in '{}'. Scanning current working directory...", flows_dir);
+                    scan_repo_internal(Path::new("."))?
+                }
+            };
+
+            // 2. Load baseline flowmap
+            let base_map = if let Some(base_path) = baseline {
+                load_connected_map(&base_path)?
+            } else {
+                retrieve_git_baseline(&against, &flows_dir)?
+            };
+
+            // 3. Compute Delta with context
+            let report = FlowDiffer::diff_with_context(&base_map, &curr_map, &against);
+            FlowDiffer::print_delta_report(&report);
+
+            // 4. Generate PR Markdown Report
+            let flows_folder = Path::new(&flows_dir);
+            if pr || flows_folder.exists() {
+                if !flows_folder.exists() {
+                    let _ = fs::create_dir_all(flows_folder);
+                }
+                let pr_file = flows_folder.join("PR_DELTA.md");
+                let pr_markdown = FlowDiffer::generate_pr_markdown(&report);
+                fs::write(&pr_file, pr_markdown)?;
+                println!("Generated PR Markdown Report: {}", pr_file.display().to_string().bright_green());
+            }
+
+            // 5. Generate interactive Visual Delta HTML
+            if html {
+                let html_file = flows_folder.join("delta.html");
+                HtmlGenerator::generate(&curr_map, &html_file)?;
+                println!("Generated Visual Delta Explorer: {}", html_file.display().to_string().bright_green());
+            }
+
+            // 6. Strict mode exit
+            if strict && (!report.breaking_changes.is_empty() || report.hazards.iter().any(|h| h.severity == "CRITICAL" || h.severity == "HIGH")) {
+                eprintln!("{}", "Delta check failed: breaking behavioral changes or critical hazards detected.".bold().red());
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
+}
+
+fn retrieve_git_baseline(against: &str, flows_dir: &str) -> Result<ConnectedFlowMap> {
+    // 1. Try git show
+    let candidates = [
+        format!("{}:{}/flowmap.json", against, flows_dir),
+        format!("origin/{}:{}/flowmap.json", against, flows_dir),
+        format!("{}:flowmap.json", against),
+        format!("origin/{}:flowmap.json", against),
+    ];
+
+    for target in &candidates {
+        let output = Command::new("git")
+            .args(["show", target])
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() && !out.stdout.is_empty() {
+                if let Ok(map) = serde_json::from_slice::<ConnectedFlowMap>(&out.stdout) {
+                    println!("Successfully loaded baseline flowmap from git object: {}", target.bright_cyan());
+                    return Ok(map);
+                }
+            }
+        }
+    }
+
+    // 2. Try ephemeral worktree if ref exists
+    let ref_check = Command::new("git")
+        .args(["rev-parse", "--verify", against])
+        .output();
+
+    let target_ref = if let Ok(rc) = ref_check {
+        if rc.status.success() {
+            against.to_string()
+        } else {
+            let origin_ref = format!("origin/{}", against);
+            let origin_check = Command::new("git")
+                .args(["rev-parse", "--verify", &origin_ref])
+                .output();
+            if let Ok(oc) = origin_check {
+                if oc.status.success() {
+                    origin_ref
+                } else {
+                    anyhow::bail!("Git ref '{}' or 'origin/{}' does not exist in local git repository.", against, against);
+                }
+            } else {
+                anyhow::bail!("Could not verify git ref '{}'.", against);
+            }
+        }
+    } else {
+        anyhow::bail!("Git command execution failed. Ensure git is installed and in your PATH.");
+    };
+
+    println!("{}", format!("No committed flowmap.json on '{}'. Creating ephemeral git worktree to extract baseline...", target_ref).yellow());
+    let temp_worktree = Path::new(".flowmap-temp-baseline");
+    if temp_worktree.exists() {
+        let _ = fs::remove_dir_all(temp_worktree);
+        let _ = Command::new("git").args(["worktree", "remove", "--force", ".flowmap-temp-baseline"]).output();
+    }
+
+    let wt_res = Command::new("git")
+        .args(["worktree", "add", "--detach", ".flowmap-temp-baseline", &target_ref])
+        .output();
+
+    match wt_res {
+        Ok(out) if out.status.success() => {
+            println!("Extracting baseline from branch '{}'...", target_ref.bright_cyan());
+            let baseline_map = scan_repo_internal(temp_worktree)?;
+            let _ = Command::new("git").args(["worktree", "remove", "--force", ".flowmap-temp-baseline"]).output();
+            if temp_worktree.exists() {
+                let _ = fs::remove_dir_all(temp_worktree);
+            }
+            Ok(baseline_map)
+        }
+        Ok(out) => {
+            let err_msg = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("Failed to create git worktree for baseline '{}': {}", target_ref, err_msg.trim());
+        }
+        Err(e) => anyhow::bail!("Failed to execute 'git worktree': {}", e),
+    }
+}
+
+fn scan_repo_internal(repo: &Path) -> Result<ConnectedFlowMap> {
+    let is_rust = repo.join("Cargo.toml").exists();
+    let is_csharp = WalkDir::new(repo).max_depth(3).into_iter().filter_map(|e| e.ok()).any(|e| {
+        e.path().extension().map_or(false, |ext| ext == "csproj" || ext == "sln")
+    });
+
+    let flows = if is_rust {
+        let src_dir = repo.join("src");
+        let scan_dir = if src_dir.exists() { &src_dir } else { repo };
+        RustExtractor::extract(scan_dir)?
+    } else if is_csharp {
+        let temp_dir = std::env::temp_dir().join(format!("flowmap_extract_{}", uuid_simple()));
+        fs::create_dir_all(&temp_dir)?;
+        CSharpExtractor::run(repo, &temp_dir, None, None)?;
+        let f = load_flows_from_dir(&temp_dir)?;
+        let _ = fs::remove_dir_all(&temp_dir);
+        f
+    } else {
+        anyhow::bail!("Could not determine project type in '{}'. Expected Cargo.toml or .csproj/.sln.", repo.display());
+    };
+
+    Ok(Linker::build(flows, HashMap::new()))
+}
+
+fn uuid_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{:x}", nanos)
 }
 
 fn load_flows_from_dir(dir: &Path) -> Result<Vec<Flow>> {
@@ -363,8 +534,9 @@ fn load_flows_from_dir(dir: &Path) -> Result<Vec<Flow>> {
                 continue;
             }
             if let Ok(content) = fs::read_to_string(entry.path()) {
-                if let Ok(flow) = serde_json::from_str::<Flow>(&content) {
-                    flows.push(flow);
+                match serde_json::from_str::<Flow>(&content) {
+                    Ok(flow) => flows.push(flow),
+                    Err(e) => eprintln!("Failed to parse flow {}: {}", entry.path().display(), e),
                 }
             }
         }

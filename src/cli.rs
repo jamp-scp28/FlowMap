@@ -158,4 +158,35 @@ pub enum Commands {
         #[arg(long)]
         strict: bool,
     },
+
+    /// Compute behavioral delta and blast radius between current branch and a base branch (e.g. main)
+    Delta {
+        /// Target branch, tag, or commit to compare against (default: 'main')
+        #[arg(short, long, default_value = "main")]
+        against: String,
+
+        /// Subdirectory inside target repo where flow artifacts reside (default: 'flows')
+        #[arg(short, long, default_value = "flows")]
+        flows_dir: String,
+
+        /// Path to current flowmap.json (default: <flows_dir>/flowmap.json)
+        #[arg(short, long)]
+        current: Option<PathBuf>,
+
+        /// Path to optional baseline flowmap.json file (skips git baseline lookup)
+        #[arg(short, long)]
+        baseline: Option<PathBuf>,
+
+        /// Generate GitHub/GitLab Pull Request Markdown report (<flows_dir>/PR_DELTA.md)
+        #[arg(long)]
+        pr: bool,
+
+        /// Generate interactive visual delta HTML explorer (<flows_dir>/delta.html)
+        #[arg(long)]
+        html: bool,
+
+        /// Exit with non-zero code if breaking behavioral changes or critical hazards are detected
+        #[arg(long)]
+        strict: bool,
+    },
 }
