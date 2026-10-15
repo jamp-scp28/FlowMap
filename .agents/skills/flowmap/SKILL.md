@@ -17,6 +17,9 @@ of line-by-line review. It models:
 
 The CLI binary `flowmap.exe` (and its companion `CSharpFlowExtractor.exe`) can be placed in your `PATH` or invoked directly.
 
+> [!IMPORTANT]
+> **Privacy & Local Execution:** FlowMap operates 100% locally and offline via static AST parsing. It transmits no telemetry or data. When acting as an AI pair-programmer, never read or transmit files containing secrets, API keys, `.env`, or connection strings.
+
 ---
 
 ## Standard Workflows for Agents

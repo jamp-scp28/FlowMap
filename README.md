@@ -7,7 +7,13 @@
 
 **FlowMap** is a high-precision, autonomous behavioral and architectural mapping engine for **C# (.NET / Roslyn)** and **Rust (syn AST / Diesel / Axum)** codebases.
 
-Instead of stopping at shallow Swagger endpoint definitions, FlowMap performs **deep recursive call-tree inlining**, traverses dependency-injection interfaces, aggregates domain roots, connects asynchronous **Pub/Sub event meshes**, models shared database state coupling, and renders an interactive visual mental map with zero repository pollution.
+> [!IMPORTANT]
+> **100% Local-First & Static Analysis Privacy Guarantee**
+> FlowMap runs **entirely offline and locally on your machine**. It performs purely static AST analysis (using Roslyn for C# and Syn for Rust) without executing your code, without connecting to external servers, and without transmitting telemetry or source code to third parties.
+> 
+> * **Zero Remote Data Transfer:** All extracted flow graphs and interactive HTML explorers remain strictly on your local filesystem inside `<repo>/flows/`.
+> * **AI Agent Boundaries:** The *only* data transfer that ever occurs is whatever context or flow summaries are explicitly provided to your AI coding agent (e.g., Gemini, Claude, Cursor, Copilot) during conversation.
+> * **Secrets & Sensitive Files:** If your repository contains sensitive files or credentials (`.env`, private keys, `appsettings.Production.json`), please ensure you instruct your AI agent to exclude them or maintain them in `.gitignore`. FlowMap itself strictly performs static code syntax extraction and ignores file contents outside of declared code symbols.
 
 ---
 
