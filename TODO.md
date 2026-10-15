@@ -48,7 +48,7 @@ All 20 identified gaps (G1–G20) have been resolved with deep AST traversal, se
   - *Outcome:* Recursively searches subdirectories (`src/`, `Source/`, etc.) up to depth 8 for `.sln` or `.csproj` files when scanning from the root.
 - [x] **G10. Roslyn Compilation Diagnostics Suppression & Reference Resolution**
   - *Implemented in:* `extractors/csharp/Program.cs:ResolveAssemblyReferences`
-  - *Outcome:* Automatically resolves compiled DLLs from `bin/**` and NuGet packages from `obj/**/project.assets.json` and `%USERPROFILE%/.nuget/packages`, eliminating unresolved symbol diagnostics.
+  - *Outcome:* Reference priority is `--refs` → running framework → auto-discovered `bin/**` / `project.assets.json` DLLs (gap-fill only); DLLs built from the scanned sources are skipped. Diagnostics line prints the top error codes.
 
 ---
 
@@ -61,8 +61,8 @@ All 20 identified gaps (G1–G20) have been resolved with deep AST traversal, se
   - *Implemented in:* `src/impact.rs:ImpactAnalyzer`
   - *Outcome:* Reports every flow calling into methods in aggregate files (e.g., `Order.cs`) across all inlining depths and MediatR dispatch chains.
 - [x] **G13. Member-Level Impact Precision**
-  - *Implemented in:* `src/impact.rs:ImpactAnalyzer`
-  - *Outcome:* Traces impact from specific modified methods, properties, or DTO types instead of whole-file over-matching.
+  - *Implemented in:* `src/impact.rs:parse_unified_diff` / `member_spans`
+  - *Outcome:* `impact --diff` parses `git diff -U0` hunks and only hits flows executing a changed member; hunks outside any mapped member fall back to file-level. Traces impact from specific modified methods, properties, or DTO types instead of whole-file over-matching.
 - [x] **G14. Strict Symbol Resolution for Impact (`impact --symbols`)**
   - *Implemented in:* `src/impact.rs:symbol_matches`
   - *Outcome:* Strict token boundary matching prevents false substring hits (e.g., `--symbols Accept` no longer matches `SendTermsAcceptedEmailHandler`).
@@ -93,7 +93,7 @@ All 20 identified gaps (G1–G20) have been resolved with deep AST traversal, se
   - *Outcome:* Merges flowmaps across multiple services and repositories into a single unified topology, connecting publishers in Service A with consumers in Service B and auditing cross-repo dead events.
 - [x] **G19. Python Extractor Support for Event Consumers/Publishers**
   - *Implemented in:* `extractors/python/extractor.py` & `src/extractors/python.rs`
-  - *Outcome:* Discovers FastAPI/Flask HTTP routes, Celery tasks, event bus `@subscribe` handlers, event publications, database writes, and feature flags in Python services.
+  - *Outcome:* Discovers Azure Functions v1 (`function.json` + `main()`) triggers, FastAPI/Flask HTTP routes, Celery tasks, event bus `@subscribe` handlers, event publications, database writes, and feature flags in Python services.
 
 ---
 

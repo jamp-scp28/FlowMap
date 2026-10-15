@@ -116,4 +116,59 @@ def handle_order_submitted(event):
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_azure_functions_v1_and_v2_g19() {
+        let root = std::env::temp_dir().join(format!("flowmap_az_test_{}", std::process::id()));
+        let out_dir = root.join("flows");
+        let func = |name: &str, bindings: &str, body: &str| {
+            let d = root.join(name);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("function.json"), format!(r#"{{"scriptFile": "__init__.py", "bindings": [{bindings}]}}"#)).unwrap();
+            fs::write(d.join("__init__.py"), format!("import azure.functions as func
+
+def main(arg):
+{body}
+")).unwrap();
+        };
+        func("GetOrder", r#"{"type": "httpTrigger", "direction": "in", "name": "req", "methods": ["get"], "route": "orders/{id}"}"#, "    session.query(Order)");
+        func("Health", r#"{"type": "httpTrigger", "direction": "in", "name": "req"}"#, "    return 1");
+        func("OnOrderPlaced", r#"{"type": "serviceBusTrigger", "direction": "in", "name": "msg", "topicName": "order-placed", "subscriptionName": "s"}"#, "    session.add(Inventory)");
+        func("Nightly", r#"{"type": "timerTrigger", "direction": "in", "name": "t", "schedule": "0 0 2 * * *"}"#, "    return 1");
+
+        // v2 decorator model: names come in as keyword arguments
+        fs::write(root.join("function_app.py"), r#"
+import azure.functions as func
+app = func.FunctionApp()
+
+@app.route(route="invoices/{id}", methods=[func.HttpMethod.GET])
+def get_invoice(req):
+    return 1
+
+@app.service_bus_topic_trigger(arg_name="msg", topic_name="invoice-sent", subscription_name="s", connection="SB")
+def on_invoice_sent(msg):
+    return 1
+
+@app.timer_trigger(schedule="0 0 3 * * *", arg_name="t")
+def cleanup(t):
+    return 1
+"#).unwrap();
+
+        PythonExtractor::run(&root, &out_dir).unwrap();
+        let flows: Vec<Flow> = fs::read_dir(&out_dir).unwrap()
+            .map(|e| serde_json::from_str(&fs::read_to_string(e.unwrap().path()).unwrap()).unwrap())
+            .collect();
+        let get = |id: &str| flows.iter().find(|f| f.id == id).unwrap_or_else(|| panic!("missing {id}"));
+
+        assert_eq!(flows.len(), 7);
+        assert_eq!(get("GET api/invoices/{id}").kind, "http");
+        assert_eq!(get("invoice-sentHandler").trigger.topic.as_deref(), Some("invoice-sent"));
+        assert_eq!(get("cleanup").kind, "cron");
+        assert_eq!(get("GET api/orders/{id}").handler.symbol, "GetOrder.main");
+        assert_eq!(get("ANY api/Health").kind, "http");
+        assert_eq!(get("order-placedHandler").coupling.writes, vec!["Inventory".to_string()]);
+        assert_eq!(get("Nightly").kind, "cron");
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

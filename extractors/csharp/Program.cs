@@ -26,97 +26,28 @@ trees.Add(CSharpSyntaxTree.ParseText(gu != null ? File.ReadAllText(gu) : string.
             "Microsoft.AspNetCore.Routing", "Microsoft.Extensions.Configuration", "Microsoft.Extensions.DependencyInjection",
             "Microsoft.Extensions.Hosting", "Microsoft.Extensions.Logging" }.Select(n => $"global using global::{n};")), path: "<implicit-usings>"));
 
-var projectAsm = Path.GetFileName(opts.ProjectDir.TrimEnd('\\', '/'));
+// Assemblies built from the scanned sources: their DLLs would duplicate source types.
+var sourceAsms = new HashSet<string>(
+    Directory.EnumerateFiles(opts.ProjectDir, "*.csproj", SearchOption.AllDirectories).Select(Path.GetFileNameWithoutExtension)!,
+    StringComparer.OrdinalIgnoreCase) { Path.GetFileName(opts.ProjectDir.TrimEnd('\\', '/')) };
 
 var refs = new List<MetadataReference>();
 var foundDllNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+// First one wins per file name, so order is priority: --refs, then the running framework, then
+// auto-discovered bin/NuGet DLLs only fill gaps (G10). Letting old package copies of System.Runtime /
+// netstandard shadow the framework is what blew diagnostics up (CS0518/CS1705/CS0433).
+void AddRef(string dll)
+{
+    if (sourceAsms.Contains(Path.GetFileNameWithoutExtension(dll)) || !foundDllNames.Add(Path.GetFileName(dll))) return;
+    try { _ = AssemblyName.GetAssemblyName(dll); refs.Add(MetadataReference.CreateFromFile(dll)); }
+    catch { foundDllNames.Remove(Path.GetFileName(dll)); /* native dll */ }
+}
 
 // 1. Explicit refs directory
 if (opts.RefsDir != null && Directory.Exists(opts.RefsDir))
-{
-    foreach (var dll in Directory.EnumerateFiles(opts.RefsDir, "*.dll"))
-    {
-        if (Path.GetFileNameWithoutExtension(dll).Equals(projectAsm, StringComparison.OrdinalIgnoreCase)) continue;
-        try
-        {
-            var n = Path.GetFileName(dll);
-            if (foundDllNames.Add(n))
-            {
-                _ = AssemblyName.GetAssemblyName(dll);
-                refs.Add(MetadataReference.CreateFromFile(dll));
-            }
-        }
-        catch { /* native dll */ }
-    }
-}
+    foreach (var dll in Directory.EnumerateFiles(opts.RefsDir, "*.dll")) AddRef(dll);
 
-// 2. Auto-discover DLLs in project bin directories (bin/Debug, bin/Release, etc.) - G10
-if (Directory.Exists(opts.ProjectDir))
-{
-    try
-    {
-        foreach (var binDir in Directory.EnumerateDirectories(opts.ProjectDir, "bin", SearchOption.AllDirectories))
-        {
-            foreach (var dll in Directory.EnumerateFiles(binDir, "*.dll", SearchOption.AllDirectories))
-            {
-                var n = Path.GetFileName(dll);
-                if (Path.GetFileNameWithoutExtension(dll).Equals(projectAsm, StringComparison.OrdinalIgnoreCase)) continue;
-                if (foundDllNames.Add(n))
-                {
-                    try { refs.Add(MetadataReference.CreateFromFile(dll)); } catch { }
-                }
-            }
-        }
-    }
-    catch { }
-
-    // 3. Auto-discover NuGet packages via project.assets.json - G10
-    try
-    {
-        var userNuget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
-        foreach (var assetsJson in Directory.EnumerateFiles(opts.ProjectDir, "project.assets.json", SearchOption.AllDirectories))
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(assetsJson));
-                var packageFolders = new List<string>();
-                if (doc.RootElement.TryGetProperty("packageFolders", out var pf))
-                {
-                    foreach (var prop in pf.EnumerateObject()) packageFolders.Add(prop.Name);
-                }
-                if (packageFolders.Count == 0 && Directory.Exists(userNuget)) packageFolders.Add(userNuget);
-
-                if (doc.RootElement.TryGetProperty("targets", out var targets))
-                {
-                    foreach (var target in targets.EnumerateObject())
-                    {
-                        foreach (var pkg in target.Value.EnumerateObject())
-                        {
-                            if (pkg.Value.TryGetProperty("compile", out var compile))
-                            {
-                                foreach (var dllProp in compile.EnumerateObject())
-                                {
-                                    var relPath = Path.Combine(pkg.Name, dllProp.Name).Replace('/', Path.DirectorySeparatorChar);
-                                    foreach (var baseDir in packageFolders)
-                                    {
-                                        var fullPath = Path.Combine(baseDir, relPath);
-                                        if (File.Exists(fullPath) && foundDllNames.Add(Path.GetFileName(fullPath)))
-                                        {
-                                            try { refs.Add(MetadataReference.CreateFromFile(fullPath)); } catch { }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-    }
-    catch { }
-}
-
+// 2. Running framework (+ ASP.NET Core shared framework)
 var tpa = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?.Split(Path.PathSeparator) ?? [];
 var dotnetRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "..", ".."));
 var aspDir = Path.Combine(dotnetRoot, "Microsoft.AspNetCore.App");
@@ -124,19 +55,47 @@ if (Directory.Exists(aspDir))
 {
     var best = Directory.GetDirectories(aspDir).OrderByDescending(d => d).FirstOrDefault(d => Path.GetFileName(d).StartsWith("9.") || Path.GetFileName(d).StartsWith("8."));
     if (best != null)
-        foreach (var dll in Directory.EnumerateFiles(best, "*.dll"))
-        {
-            var n = Path.GetFileName(dll);
-            if (foundDllNames.Add(n))
-                try { _ = AssemblyName.GetAssemblyName(dll); refs.Add(MetadataReference.CreateFromFile(dll)); } catch { }
-        }
+        foreach (var dll in Directory.EnumerateFiles(best, "*.dll")) AddRef(dll);
 }
-foreach (var p in tpa)
+foreach (var p in tpa) AddRef(p);
+
+// 3. Auto-discover DLLs in project bin directories - G10
+try
 {
-    var n = Path.GetFileName(p);
-    if (foundDllNames.Add(n))
-        try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+    foreach (var binDir in Directory.EnumerateDirectories(opts.ProjectDir, "bin", SearchOption.AllDirectories))
+        foreach (var dll in Directory.EnumerateFiles(binDir, "*.dll", SearchOption.AllDirectories)) AddRef(dll);
 }
+catch { }
+
+// 4. Auto-discover NuGet packages via project.assets.json - G10
+try
+{
+    var userNuget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+    foreach (var assetsJson in Directory.EnumerateFiles(opts.ProjectDir, "project.assets.json", SearchOption.AllDirectories))
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(assetsJson));
+            var packageFolders = new List<string>();
+            if (doc.RootElement.TryGetProperty("packageFolders", out var pf))
+                foreach (var prop in pf.EnumerateObject()) packageFolders.Add(prop.Name);
+            if (packageFolders.Count == 0 && Directory.Exists(userNuget)) packageFolders.Add(userNuget);
+
+            if (doc.RootElement.TryGetProperty("targets", out var targets))
+                foreach (var target in targets.EnumerateObject())
+                    foreach (var pkg in target.Value.EnumerateObject())
+                        if (pkg.Value.TryGetProperty("compile", out var compile))
+                            foreach (var dllProp in compile.EnumerateObject())
+                                foreach (var baseDir in packageFolders)
+                                {
+                                    var fullPath = Path.Combine(baseDir, pkg.Name, dllProp.Name).Replace('/', Path.DirectorySeparatorChar);
+                                    if (File.Exists(fullPath)) AddRef(fullPath);
+                                }
+        }
+        catch { }
+    }
+}
+catch { }
 
 var compilation = CSharpCompilation.Create("flow", trees, refs,
     new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
@@ -216,6 +175,15 @@ var registry = new TypeRegistry(methodIndex, interfaceImplementations, classByNa
 
 string[] httpAttrs = ["HttpGet", "HttpPost", "HttpPut", "HttpPatch", "HttpDelete"];
 int count = 0;
+// Overloads / same-named classes in different services share a base name: suffix instead of overwriting.
+var writtenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+void WriteFlow(string baseName, object flow)
+{
+    var name = baseName;
+    for (var i = 2; !writtenNames.Add(name); i++) name = $"{baseName}_{i}";
+    File.WriteAllText(Path.Combine(opts.OutDir, name + ".json"), JsonSerializer.Serialize(flow, Json.Options));
+    count++;
+}
 
 // 2. Scan HTTP Controllers (G1: Route Token Expansion)
 foreach (var tree in trees)
@@ -235,9 +203,7 @@ foreach (var tree in trees)
             var rawCombined = string.Join('/', new[] { prefix, tmpl }.Where(s => s.Length > 0));
             var path = RouteHelper.ResolveRoute(rawCombined, cls.Identifier.Text, m.Identifier.Text);
             var flow = FlowBuilder.Build(compilation, model, cls, m, verb, path, tree.FilePath, registry);
-            var file = Path.Combine(opts.OutDir, $"{cls.Identifier.Text}.{m.Identifier.Text}.json");
-            File.WriteAllText(file, JsonSerializer.Serialize(flow, Json.Options));
-            count++;
+            WriteFlow($"{cls.Identifier.Text}.{m.Identifier.Text}", flow);
         }
     }
 }
@@ -281,9 +247,7 @@ foreach (var tree in trees)
         var flow = FlowBuilder.BuildMinimalApi(compilation, model, enclosingClass, targetMethod, inv, handlerArg, verb, routeArg, tree.FilePath, registry);
         var safeRoute = routeArg.Replace('/', '_').Replace('{', '_').Replace('}', '_').Replace(':', '_').Trim('_');
         if (string.IsNullOrEmpty(safeRoute)) safeRoute = "root";
-        var file = Path.Combine(opts.OutDir, $"{className}_{verb}_{safeRoute}.json");
-        File.WriteAllText(file, JsonSerializer.Serialize(flow, Json.Options));
-        count++;
+        WriteFlow($"{className}_{verb}_{safeRoute}", flow);
     }
 }
 
@@ -358,16 +322,15 @@ foreach (var tree in trees)
             if (handleMethod == null) continue;
 
             var flow = FlowBuilder.BuildEventHandler(compilation, model, cls, handleMethod, eventTypeName, tree.FilePath, registry);
-            var file = Path.Combine(opts.OutDir, $"{cls.Identifier.Text}.{handleMethod.Identifier.Text}_{eventTypeName}.json");
-            File.WriteAllText(file, JsonSerializer.Serialize(flow, Json.Options));
-            count++;
+            WriteFlow($"{cls.Identifier.Text}.{handleMethod.Identifier.Text}_{eventTypeName}", flow);
         }
     }
 }
 
 Console.WriteLine($"Wrote {count} flows to {opts.OutDir}");
-var errs = compilation.GetDiagnostics().Count(d => d.Severity == DiagnosticSeverity.Error);
-Console.WriteLine($"(compilation diagnostics: {errs} errors; reference assemblies resolved: {refs.Count})");
+var errDiags = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+var topCodes = string.Join(", ", errDiags.GroupBy(d => d.Id).OrderByDescending(g => g.Count()).Take(5).Select(g => $"{g.Key}x{g.Count()}"));
+Console.WriteLine($"(compilation diagnostics: {errDiags.Count} errors [{topCodes}]; reference assemblies resolved: {refs.Count})");
 
 public static class RouteHelper
 {
@@ -566,7 +529,7 @@ static class FlowBuilder
             ["steps"] = steps,
             ["coupling"] = couplingObj,
             ["tables_touched"] = tablesTouched,
-            ["configs_and_flags"] = ctx.TrackedFlags.ToList(),
+            ["configs_and_flags"] = ConfigObjects(ctx.TrackedFlags),
         };
     }
 
@@ -648,7 +611,7 @@ static class FlowBuilder
             ["steps"] = steps,
             ["coupling"] = couplingObj,
             ["tables_touched"] = tablesTouched,
-            ["configs_and_flags"] = ctx.TrackedFlags.ToList(),
+            ["configs_and_flags"] = ConfigObjects(ctx.TrackedFlags),
         };
     }
 
@@ -732,7 +695,7 @@ static class FlowBuilder
             ["steps"] = steps,
             ["coupling"] = couplingObj,
             ["tables_touched"] = tablesTouched,
-            ["configs_and_flags"] = ctx.TrackedFlags.ToList(),
+            ["configs_and_flags"] = ConfigObjects(ctx.TrackedFlags),
         };
     }
 
@@ -771,6 +734,15 @@ static class FlowBuilder
     }
 
     public static int Line(SyntaxNode n) => n.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+
+    // Core's ConfigInfo is {name, kind, value}; bare strings fail to deserialize.
+    public static List<Dictionary<string, object?>> ConfigObjects(IEnumerable<string> names) =>
+        names.OrderBy(n => n).Select(n => new Dictionary<string, object?>
+        {
+            ["name"] = n,
+            ["kind"] = System.Text.RegularExpressions.Regex.IsMatch(n, "Enabled|Feature|Flag") ? "feature_flag" : "config",
+            ["value"] = null,
+        }).ToList();
 
     public static Dictionary<string, object?> Step(string type, params (string, object?)[] kv)
     {
@@ -1313,14 +1285,52 @@ static class FlowBuilder
             if (t.Contains("IsSuccess") || t.Contains("IsValid")) return ("validation", null);
 
             // G6: Configuration-driven branching & flags
-            if (t.Contains("Config") || t.Contains("Enabled") || t.Contains("Feature") || t.Contains("Setting") || t.Contains("Flag") || t.Contains("Option") || t.Contains("Allow"))
+            var flagName = FlagIn(cond, model);
+            if (flagName != null)
             {
-                var match = System.Text.RegularExpressions.Regex.Match(t, @"(?:\b|[._])([A-Za-z0-9_]*(?:Enabled|Feature|Config|Setting|Flag|Option|Allow)[A-Za-z0-9_]*)");
-                var flagName = match.Success ? match.Groups[1].Value : t.Replace("!", "").Trim();
                 TrackedFlags.Add(flagName);
                 return ("feature_flag", flagName);
             }
             return ("state_check", null);
+        }
+
+        static readonly System.Text.RegularExpressions.Regex FlagWord = new("Enabled|Feature|Config|Setting|Flag|Option|Allow");
+
+        // A flag is a config lookup by key, or a bool member named like one. Name-only matching
+        // used to flag null checks (`x.ThemeConfiguration != null`), collections and IDs.
+        static string? FlagIn(ExpressionSyntax cond, SemanticModel model)
+        {
+            // configuration.GetValue<bool>("Features:BetaCheckoutEnabled"), features.IsEnabledAsync("X")
+            foreach (var inv in cond.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+            {
+                var name = inv.Expression switch
+                {
+                    MemberAccessExpressionSyntax m => m.Name.Identifier.Text,
+                    SimpleNameSyntax s => s.Identifier.Text,
+                    _ => "",
+                };
+                if (name is "GetValue" or "IsEnabled" or "IsEnabledAsync" or "GetSection"
+                    && inv.ArgumentList.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax { Token.Value: string key })
+                    return key;
+            }
+            // configuration["Features:X"]
+            foreach (var ea in cond.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>())
+                if (model.GetTypeInfo(ea.Expression).Type?.Name.Contains("Configuration") == true
+                    && ea.ArgumentList.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax { Token.Value: string key })
+                    return key;
+            // order.Program.AutoApproveEnabled
+            foreach (var n in cond.DescendantNodesAndSelf().OfType<SimpleNameSyntax>())
+            {
+                var id = n.Identifier.Text;
+                if (!FlagWord.IsMatch(id)) continue;
+                var type = model.GetTypeInfo(n).Type;
+                var isBool = type?.SpecialType == SpecialType.System_Boolean
+                    || type is INamedTypeSymbol { ConstructedFrom.SpecialType: SpecialType.System_Nullable_T } nt && nt.TypeArguments[0].SpecialType == SpecialType.System_Boolean;
+                // unresolved type (missing refs): only trust unambiguous names
+                if (isBool || ((type is null || type.TypeKind == TypeKind.Error) && System.Text.RegularExpressions.Regex.IsMatch(id, "Enabled$|Flag$")))
+                    return id;
+            }
+            return null;
         }
 
         static string ReturnStatus(ExpressionSyntax? e, SemanticModel model)

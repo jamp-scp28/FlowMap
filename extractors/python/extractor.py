@@ -13,11 +13,17 @@ from pathlib import Path
 
 
 class PythonFlowExtractor(ast.NodeVisitor):
-    def __init__(self, filepath: str, rel_path: str):
+    def __init__(self, filepath: str, rel_path: str, azure_functions=None, route_prefix="api"):
         self.filepath = filepath
         self.rel_path = rel_path.replace("\\", "/")
         self.flows = []
         self.current_class = None
+        # Azure Functions v1: entry point name -> (function name, trigger tuple) from function.json
+        self.azure_functions = azure_functions or {}
+        self.route_prefix = route_prefix
+
+    def _azure(self, node):
+        return None if self.current_class else self.azure_functions.get(node.name)
 
     def visit_ClassDef(self, node: ast.ClassDef):
         prev_class = self.current_class
@@ -39,15 +45,18 @@ class PythonFlowExtractor(ast.NodeVisitor):
             return
 
         flow_kind, method, path, topic = flow_info
+        # v1 entry points are all `main`: name flows after the function folder instead
+        azure = self._azure(node)
+        name = azure[0] if azure else node.name
 
         # Infer domain and scenario
-        domain, domain_id = self._infer_domain(path or topic or node.name)
-        scenario = self._infer_scenario(method, path or topic or node.name)
+        domain, domain_id = self._infer_domain(path or topic or name)
+        scenario = self._infer_scenario(method, path or topic or name)
 
         flow_id = (
             f"{method.upper()} {path.lstrip('/')}"
             if flow_kind == "http" and path
-            else (f"{topic}Handler" if topic else node.name)
+            else (f"{topic}Handler" if topic else name)
         )
 
         steps = []
@@ -162,7 +171,8 @@ class PythonFlowExtractor(ast.NodeVisitor):
         if topic:
             trigger_obj["topic"] = topic
 
-        symbol = f"{self.current_class}.{node.name}" if self.current_class else node.name
+        owner = self.current_class or (azure and azure[0])
+        symbol = f"{owner}.{node.name}" if owner else node.name
 
         flow = {
             "id": flow_id,
@@ -200,6 +210,10 @@ class PythonFlowExtractor(ast.NodeVisitor):
 
     def _detect_flow_trigger(self, node):
         """Returns (kind, method, path, topic) or None"""
+        azure = self._azure(node)
+        if azure:
+            return azure[1]
+
         for dec in node.decorator_list:
             dec_str = self._ast_to_str(dec)
 
@@ -211,10 +225,19 @@ class PythonFlowExtractor(ast.NodeVisitor):
                     return ("http", m.upper(), path, None)
 
             # Flask route: @app.route("/orders", methods=["POST"])
+            # Azure Functions v2: @app.route(route="orders/{id}", methods=[func.HttpMethod.GET])
             if ".route(" in dec_str:
+                methods = self._extract_route_methods(dec)
+                kw = self._str_kwargs(dec)
+                if "route" in kw:
+                    path = "/" + "/".join(p.strip("/") for p in (self.route_prefix, kw["route"]) if p.strip("/"))
+                    return ("http", methods[0] if len(methods) == 1 else "ANY", path, None)
                 path = self._extract_first_arg_str(dec) or "/"
-                method = self._extract_route_methods(dec) or "GET"
-                return ("http", method.upper(), path, None)
+                return ("http", methods[0] if methods else "GET", path, None)
+
+            # Azure Functions v2 timer
+            if "timer_trigger" in dec_str:
+                return ("cron", None, None, None)
 
             # Celery task
             if ".task" in dec_str or dec_str == "shared_task":
@@ -227,9 +250,12 @@ class PythonFlowExtractor(ast.NodeVisitor):
                     topic = self._extract_first_arg_str(dec) or node.name
                     return ("event_handler", None, None, topic)
 
-            # Azure Functions trigger decorators
-            if "service_bus" in dec_str or "event_hub" in dec_str or "queue_trigger" in dec_str:
-                topic = self._extract_first_arg_str(dec) or node.name
+            # Azure Functions trigger decorators (v2 passes names as keywords)
+            if any(t in dec_str for t in ("service_bus", "event_hub", "queue_trigger", "blob_trigger", "cosmos_db_trigger", "event_grid")):
+                kw = self._str_kwargs(dec)
+                topic = self._extract_first_arg_str(dec) or next(
+                    (kw[k] for k in ("topic_name", "queue_name", "event_hub_name", "path", "container_name") if kw.get(k)),
+                    node.name)
                 return ("event_handler", None, None, topic)
 
         # Convention fallback: function name like handle_order_submitted or consume_order
@@ -339,13 +365,22 @@ class PythonFlowExtractor(ast.NodeVisitor):
         return None
 
     def _extract_route_methods(self, dec_node):
-        if hasattr(dec_node, "keywords"):
-            for kw in dec_node.keywords:
-                if kw.arg == "methods" and isinstance(kw.value, (ast.List, ast.Tuple, ast.Set)):
-                    for el in kw.value.elts:
-                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
-                            return el.value
-        return None
+        """["GET", "POST"] from methods=["get", ...] or methods=[func.HttpMethod.GET, ...]."""
+        for kw in getattr(dec_node, "keywords", []):
+            if kw.arg == "methods" and isinstance(kw.value, (ast.List, ast.Tuple, ast.Set)):
+                return [
+                    (el.value if isinstance(el, ast.Constant) else el.attr).upper()
+                    for el in kw.value.elts
+                    if (isinstance(el, ast.Constant) and isinstance(el.value, str)) or isinstance(el, ast.Attribute)
+                ]
+        return []
+
+    def _str_kwargs(self, dec_node):
+        return {
+            kw.arg: kw.value.value
+            for kw in getattr(dec_node, "keywords", [])
+            if kw.arg and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)
+        }
 
     def _ast_to_str(self, node):
         if isinstance(node, ast.Name):
@@ -373,21 +408,79 @@ class PythonFlowExtractor(ast.NodeVisitor):
         return clean.capitalize()
 
 
+AZURE_TOPIC_KEYS = {
+    "serviceBusTrigger": ("topicName", "queueName"),
+    "eventHubTrigger": ("eventHubName",),
+    "queueTrigger": ("queueName",),
+    "blobTrigger": ("path",),
+    "cosmosDBTrigger": ("containerName", "collectionName"),
+}
+
+
+def azure_v1_trigger(func_name: str, bindings: list, route_prefix: str):
+    """Map a function.json trigger binding to (kind, method, path, topic), or None."""
+    b = next((b for b in bindings if str(b.get("type", "")).endswith("Trigger")), None)
+    if b is None:
+        return None
+    t = b["type"]
+    if t == "httpTrigger":
+        methods = b.get("methods") or []
+        method = methods[0].upper() if len(methods) == 1 else "ANY"
+        path = "/" + "/".join(p.strip("/") for p in (route_prefix, b.get("route") or func_name) if p.strip("/"))
+        return ("http", method, path, None)
+    if t == "timerTrigger":
+        return ("cron", None, None, None)
+    keys = AZURE_TOPIC_KEYS.get(t, ())
+    topic = next((b[k] for k in keys if b.get(k)), func_name)
+    return ("event_handler", None, None, topic)
+
+
+def read_route_prefix(project_path: Path) -> str:
+    host = project_path / "host.json"
+    if host.exists():
+        try:
+            return json.loads(host.read_text(encoding="utf-8-sig")).get("extensions", {}).get("http", {}).get("routePrefix", "api")
+        except (ValueError, AttributeError):
+            pass
+    return "api"
+
+
+def find_azure_v1_functions(project_path: Path, route_prefix: str) -> dict:
+    """{script path: {entry point: (function name, trigger)}} from <func>/function.json files."""
+    found = {}
+    for fj in project_path.rglob("function.json"):
+        if any(part in IGNORE_DIRS for part in fj.relative_to(project_path).parts):
+            continue
+        try:
+            cfg = json.loads(fj.read_text(encoding="utf-8-sig"))
+        except ValueError as e:
+            print(f"Warning: bad {fj}: {e}", file=sys.stderr)
+            continue
+        trigger = azure_v1_trigger(fj.parent.name, cfg.get("bindings", []), route_prefix)
+        if trigger:
+            script = (fj.parent / cfg.get("scriptFile", "__init__.py")).resolve()
+            found.setdefault(str(script), {})[cfg.get("entryPoint", "main")] = (fj.parent.name, trigger)
+    return found
+
+
+IGNORE_DIRS = {
+    ".git", "venv", ".venv", "__pycache__", "node_modules",
+    ".idea", ".vscode", "build", "dist", ".pytest_cache"
+}
+
+
 def extract_project(project_dir: str, out_dir: str):
     project_path = Path(project_dir).resolve()
     out_path = Path(out_dir).resolve()
     out_path.mkdir(parents=True, exist_ok=True)
 
-    ignore_dirs = {
-        ".git", "venv", ".venv", "__pycache__", "node_modules",
-        ".idea", ".vscode", "build", "dist", ".pytest_cache"
-    }
-
+    route_prefix = read_route_prefix(project_path)
+    azure = find_azure_v1_functions(project_path, route_prefix)
     all_flows = []
     total_files = 0
 
     for root, dirs, files in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in ignore_dirs]
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
         for f in files:
             if f.endswith(".py"):
                 full_path = os.path.join(root, f)
@@ -398,18 +491,24 @@ def extract_project(project_dir: str, out_dir: str):
                     with open(full_path, "r", encoding="utf-8") as py_file:
                         source = py_file.read()
                     tree = ast.parse(source, filename=full_path)
-                    visitor = PythonFlowExtractor(full_path, rel_path)
+                    visitor = PythonFlowExtractor(full_path, rel_path, azure.get(str(Path(full_path).resolve())), route_prefix)
                     visitor.visit(tree)
                     all_flows.extend(visitor.flows)
                 except Exception as e:
                     print(f"Warning: Failed to parse Python file {rel_path}: {e}", file=sys.stderr)
 
+    written = set()
     for flow in all_flows:
         clean_part = flow["trigger"].get("path") or flow["id"]
         for ch in ['/', '\\', ':', '<', '>', '"', '|', '?', '*', '{', '}', ' ']:
             clean_part = clean_part.replace(ch, "_")
-        filename = f"{flow['domain_id']}_{flow['trigger'].get('method', 'FLOW')}_{clean_part}.json"
-        target_file = out_path / filename
+        base = f"{flow['domain_id']}_{flow['trigger'].get('method', 'FLOW')}_{clean_part}"
+        # same route/topic in two files would overwrite: suffix instead
+        name, i = base, 2
+        while name.lower() in written:
+            name, i = f"{base}_{i}", i + 1
+        written.add(name.lower())
+        target_file = out_path / f"{name}.json"
         with open(target_file, "w", encoding="utf-8") as out_f:
             json.dump(flow, out_f, indent=2)
 

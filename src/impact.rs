@@ -1,6 +1,13 @@
 use crate::model::*;
 use colored::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Changed new-side line ranges per repo-relative file (forward slashes), from `git diff -U0`.
+pub type Hunks = HashMap<String, Vec<(usize, usize)>>;
+
+fn norm(p: &str) -> String {
+    p.to_lowercase().replace('\\', "/")
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,10 +83,128 @@ impl ImpactAnalyzer {
         false
     }
 
+    /// G13: parse `git diff -U0` output into changed line ranges. Deleted files count as fully changed.
+    pub fn parse_unified_diff(diff: &str) -> Hunks {
+        let mut hunks = Hunks::new();
+        let mut old_file: Option<String> = None;
+        let mut cur: Option<String> = None;
+        for line in diff.lines() {
+            if let Some(p) = line.strip_prefix("--- ") {
+                old_file = p.strip_prefix("a/").map(str::to_string);
+            } else if let Some(p) = line.strip_prefix("+++ ") {
+                cur = match p.strip_prefix("b/") {
+                    Some(p) => Some(p.to_string()),
+                    None => {
+                        // deleted file
+                        if let Some(f) = old_file.take() {
+                            hunks.entry(f).or_default().push((0, usize::MAX));
+                        }
+                        None
+                    }
+                };
+            } else if let (Some(f), Some(h)) = (&cur, line.strip_prefix("@@ ")) {
+                // "@@ -a,b +c,d @@ ..."
+                let Some(new) = h.split_whitespace().find_map(|t| t.strip_prefix('+')) else { continue };
+                let mut it = new.split(',');
+                let start: usize = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let count: usize = it.next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                // pure deletion (count 0) sits between `start` and `start + 1`
+                let end = if count == 0 { start + 1 } else { start + count - 1 };
+                hunks.entry(f.clone()).or_default().push((start, end));
+            }
+        }
+        hunks
+    }
+
+    /// Members a flow executes: (file, decl_line). Handler plus every resolved call step.
+    fn flow_members(flow: &Flow) -> Vec<(String, usize)> {
+        let mut out = vec![(flow.handler.file.clone(), flow.handler.line)];
+        fn walk(steps: &[Step], out: &mut Vec<(String, usize)>) {
+            for s in steps {
+                if let (Some(f), Some(l)) = (&s.file, s.line) {
+                    out.push((f.clone(), l));
+                }
+                for b in s.branches.iter().flatten() {
+                    walk(&b.steps, out);
+                }
+                walk(s.steps.as_deref().unwrap_or_default(), out);
+            }
+        }
+        walk(&flow.guards, &mut out);
+        walk(&flow.steps, &mut out);
+        out
+    }
+
+    /// Span end per member (normalized file, decl_line) = last step line recorded inside it,
+    /// merged across all flows (an extractor may expand a method only on its first visit).
+    /// ponytail: span ends at the last statement, not the closing brace; edits after it fall back to file-level.
+    fn member_spans(map: &ConnectedFlowMap) -> HashMap<(String, usize), usize> {
+        fn walk(steps: &[Step], owner: &(String, usize), spans: &mut HashMap<(String, usize), usize>) {
+            for s in steps {
+                let child_owner = match (&s.file, s.line) {
+                    (Some(f), Some(l)) => {
+                        let key = (norm(f), l);
+                        spans.entry(key.clone()).or_insert(l);
+                        key
+                    }
+                    _ => {
+                        if let Some(l) = s.line {
+                            let e = spans.entry(owner.clone()).or_insert(owner.1);
+                            *e = (*e).max(l);
+                        }
+                        owner.clone()
+                    }
+                };
+                for b in s.branches.iter().flatten() {
+                    walk(&b.steps, &child_owner, spans);
+                }
+                walk(s.steps.as_deref().unwrap_or_default(), &child_owner, spans);
+            }
+        }
+        let mut spans = HashMap::new();
+        for flow in &map.flows {
+            let owner = (norm(&flow.handler.file), flow.handler.line);
+            spans.entry(owner.clone()).or_insert(owner.1);
+            walk(&flow.guards, &owner, &mut spans);
+            walk(&flow.steps, &owner, &mut spans);
+        }
+        spans
+    }
+
+    fn path_matches(flow_file_norm: &str, diff_file: &str) -> bool {
+        let d = norm(diff_file);
+        flow_file_norm.ends_with(&d) || d.ends_with(flow_file_norm)
+    }
+
+    /// Files/symbols are matched as given. Files given as diff hunks get member-level matching (G13):
+    /// a flow is hit only when a hunk lands inside a member it executes. Hunks outside every
+    /// known member (fields, ctors, DTOs, ...) fall back to whole-file matching.
     pub fn analyze(
         map: &ConnectedFlowMap,
         changed_files_or_symbols: &[String],
+        hunks: &Hunks,
     ) -> ImpactReport {
+        let spans = Self::member_spans(map);
+        let mut member_hit_files = HashSet::new();
+        let mut file_fallback = Vec::new();
+        for (file, ranges) in hunks {
+            if Self::is_test_file(file) {
+                continue;
+            }
+            let file_spans: Vec<_> = spans.iter().filter(|((f, _), _)| Self::path_matches(f, file)).collect();
+            let outside = ranges.iter().any(|&(a, b)| {
+                !file_spans.iter().any(|((_, start), &end)| a <= end && b >= *start)
+            });
+            if outside {
+                file_fallback.push(file.clone());
+            } else {
+                member_hit_files.insert(file.clone());
+            }
+        }
+        let mut inputs: Vec<String> = changed_files_or_symbols.to_vec();
+        inputs.extend(file_fallback);
+        let changed_files_or_symbols = &inputs[..];
+
         let mut direct = Vec::new();
         let mut directly_affected_ids = HashSet::new();
         let mut directly_affected_writes = HashSet::new();
@@ -119,6 +244,18 @@ impl ImpactAnalyzer {
                 // Check calls inside steps (inlining across mediator, aggregates, handlers)
                 Self::find_matching_calls(&flow.steps, target_trimmed, &mut matched_reasons);
             }
+
+            // G13: member-level hits from diff hunks
+            for (file, line) in Self::flow_members(flow) {
+                let key = (norm(&file), line);
+                let end = spans.get(&key).copied().unwrap_or(line);
+                for diff_file in member_hit_files.iter().filter(|d| Self::path_matches(&key.0, d)) {
+                    if hunks[diff_file].iter().any(|&(a, b)| a <= end && b >= line) {
+                        matched_reasons.push(format!("Member changed: {}:{}-{}", file, line, end));
+                    }
+                }
+            }
+            matched_reasons.dedup();
 
             if !matched_reasons.is_empty() {
                 directly_affected_ids.insert(flow.id.clone());
@@ -219,7 +356,7 @@ impl ImpactAnalyzer {
         let total = direct.len() + active_state_impacts.len() + background_state_impacts.len() + event_impacts.len();
 
         ImpactReport {
-            changed_inputs: changed_files_or_symbols.to_vec(),
+            changed_inputs: changed_files_or_symbols.iter().cloned().chain(member_hit_files).collect(),
             direct_impacts: direct,
             active_state_impacts,
             background_state_impacts,
@@ -409,18 +546,53 @@ mod tests {
         };
 
         // G12: Blast radius on Order.cs finds POST api/Orders through deep inlining
-        let report = ImpactAnalyzer::analyze(&map, &["src/Domain/Order.cs".to_string()]);
+        let report = ImpactAnalyzer::analyze(&map, &["src/Domain/Order.cs".to_string()], &Hunks::new());
         assert_eq!(report.direct_impacts.len(), 1);
         assert_eq!(report.direct_impacts[0].flow_id, "POST api/Orders");
 
         // G14: Property symbol impact matches AutoApproveEnabled
-        let prop_report = ImpactAnalyzer::analyze(&map, &["AutoApproveEnabled".to_string()]);
+        let prop_report = ImpactAnalyzer::analyze(&map, &["AutoApproveEnabled".to_string()], &Hunks::new());
         assert_eq!(prop_report.direct_impacts.len(), 1);
         assert_eq!(prop_report.direct_impacts[0].flow_id, "POST api/Orders");
 
         // G15: Test file does NOT mark production flow as directly impacted
-        let test_report = ImpactAnalyzer::analyze(&map, &["tests/OrderTests.cs".to_string()]);
+        let test_report = ImpactAnalyzer::analyze(&map, &["tests/OrderTests.cs".to_string()], &Hunks::new());
         assert_eq!(test_report.direct_impacts.len(), 0);
         assert_eq!(test_report.test_files.len(), 1);
+    }
+
+    #[test]
+    fn test_member_level_impact_g13() {
+        let flow = |id: &str, method: &str, line: usize, stmt: usize| -> Flow {
+            serde_json::from_str(&format!(r#"{{
+                "id": "{id}", "kind": "http",
+                "trigger": {{ "method": "POST", "path": "{id}" }},
+                "handler": {{ "symbol": "OrdersController.{method}", "file": "C:\\repo\\src\\OrdersController.cs", "line": {line} }},
+                "steps": [{{ "type": "call", "symbol": "Order.{method}", "file": "C:\\repo\\src\\Domain\\Order.cs", "line": {line},
+                             "steps": [{{ "type": "effect", "line": {stmt} }}] }}]
+            }}"#)).unwrap()
+        };
+        let map = ConnectedFlowMap {
+            version: "1.0".into(), generated_at: "now".into(), stats: Default::default(), domains: Default::default(),
+            flows: vec![flow("submit", "Submit", 10, 14), flow("cancel", "Cancel", 20, 25)],
+            entity_topology: Default::default(), table_index: Default::default(), event_index: Default::default(),
+            flag_index: Default::default(), service_index: Default::default(), annotations: Default::default(),
+        };
+        let diff = "diff --git a/src/Domain/Order.cs b/src/Domain/Order.cs
+--- a/src/Domain/Order.cs
++++ b/src/Domain/Order.cs
+@@ -13 +13,2 @@ class Order
+";
+        let hunks = ImpactAnalyzer::parse_unified_diff(diff);
+        assert_eq!(hunks["src/Domain/Order.cs"], vec![(13, 14)]);
+
+        // Edit inside Submit() hits only the submit flow, not every Order.cs caller.
+        let r = ImpactAnalyzer::analyze(&map, &[], &hunks);
+        let ids: Vec<_> = r.direct_impacts.iter().map(|i| i.flow_id.as_str()).collect();
+        assert_eq!(ids, vec!["submit"]);
+
+        // Edit outside any mapped member (e.g. a field at line 3) falls back to file-level.
+        let hunks = ImpactAnalyzer::parse_unified_diff(&diff.replace("@@ -13 +13,2 @@", "@@ -3 +3 @@"));
+        assert_eq!(ImpactAnalyzer::analyze(&map, &[], &hunks).direct_impacts.len(), 2);
     }
 }

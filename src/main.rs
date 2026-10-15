@@ -143,20 +143,7 @@ fn main() -> Result<()> {
                 let src_dir = repo.join("src");
                 let scan_dir = if src_dir.exists() { &src_dir } else { &repo };
                 let flows = RustExtractor::extract(scan_dir)?;
-                for f in &flows {
-                    let clean_part = f.trigger.path.as_deref().unwrap_or(&f.id)
-                        .replace(['/', '\\', ':', '<', '>', '"', '|', '?', '*'], "_")
-                        .replace(['{', '}'], "")
-                        .replace(' ', "_");
-                    let filename = format!(
-                        "{}_{}_{}.json",
-                        f.domain_id,
-                        f.trigger.method.as_deref().unwrap_or("FLOW"),
-                        clean_part
-                    );
-                    let file_path = raw_flows_dir.join(filename);
-                    fs::write(&file_path, serde_json::to_string_pretty(f)?)?;
-                }
+                write_flows(&raw_flows_dir, &flows)?;
                 println!("Extracted {} Rust flows to: {}", flows.len().to_string().bold(), raw_flows_dir.display());
             } else if let Some(ref cs) = csharp_entry {
                 println!("Detected C# project ({}). Running C# Roslyn Extractor...", cs.path().display());
@@ -254,21 +241,18 @@ fn main() -> Result<()> {
             let connected_map: ConnectedFlowMap = load_connected_map(&map)?;
             let mut inputs = Vec::new();
 
+            let mut hunks = impact::Hunks::new();
             if let Some(git_ref) = diff {
-                println!("Running 'git diff --name-only {}' to detect changed files...", git_ref.yellow());
+                println!("Running 'git diff -U0 {}' to detect changed members...", git_ref.yellow());
                 let output = Command::new("git")
-                    .args(["diff", "--name-only", &git_ref])
+                    .args(["diff", "-U0", "--no-color", "--no-ext-diff", &git_ref])
                     .output()
                     .context("Failed to run git diff")?;
 
                 if output.status.success() {
-                    let diff_files = String::from_utf8_lossy(&output.stdout);
-                    for line in diff_files.lines() {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            inputs.push(trimmed.to_string());
-                        }
-                    }
+                    hunks = ImpactAnalyzer::parse_unified_diff(&String::from_utf8_lossy(&output.stdout));
+                    // Test files are only listed, never member-matched.
+                    inputs.extend(hunks.keys().filter(|f| ImpactAnalyzer::is_test_file(f)).cloned());
                 } else {
                     eprintln!("Warning: git diff command returned error. Proceeding with explicit arguments.");
                 }
@@ -277,13 +261,13 @@ fn main() -> Result<()> {
             inputs.extend(files);
             inputs.extend(symbols);
 
-            if inputs.is_empty() {
+            if inputs.is_empty() && hunks.is_empty() {
                 eprintln!("{}", "Error: No files, symbols, or git diff provided for impact analysis.".red());
                 eprintln!("Usage: flowmap impact --files <file1,file2> or --diff <ref>");
                 std::process::exit(1);
             }
 
-            let report = ImpactAnalyzer::analyze(&connected_map, &inputs);
+            let report = ImpactAnalyzer::analyze(&connected_map, &inputs, &hunks);
             ImpactAnalyzer::print_report(&report);
         }
 
@@ -343,15 +327,7 @@ fn main() -> Result<()> {
                 println!("{}", "Running Native Rust Extractor...".bold().bright_blue());
                 let flows = RustExtractor::extract(&project)?;
                 fs::create_dir_all(&out)?;
-                for f in &flows {
-                    let filename = format!(
-                        "rust_{}_{}.json",
-                        f.trigger.method.as_deref().unwrap_or("FLOW"),
-                        f.trigger.path.as_deref().unwrap_or(&f.id).replace('/', "_").replace(['{', '}'], "")
-                    );
-                    let file_path = out.join(filename);
-                    fs::write(&file_path, serde_json::to_string_pretty(f)?)?;
-                }
+                write_flows(&out, &flows)?;
                 println!("Extracted {} Rust flows to: {}", flows.len().to_string().bold(), out.display().to_string().bright_green());
             }
             "python" | "py" => {
@@ -707,6 +683,7 @@ fn uuid_simple() -> String {
 
 fn load_flows_from_dir(dir: &Path) -> Result<Vec<Flow>> {
     let mut flows = Vec::new();
+    let mut failures = Vec::new();
     if !dir.exists() {
         return Ok(flows);
     }
@@ -720,13 +697,46 @@ fn load_flows_from_dir(dir: &Path) -> Result<Vec<Flow>> {
             if let Ok(content) = fs::read_to_string(entry.path()) {
                 match serde_json::from_str::<Flow>(&content) {
                     Ok(flow) => flows.push(flow),
-                    Err(e) => eprintln!("Failed to parse flow {}: {}", entry.path().display(), e),
+                    // A flow-shaped file that won't parse is an extractor/schema mismatch: fail loudly
+                    // instead of silently dropping it. Other JSON (package.json, ...) is just skipped.
+                    Err(e) if is_flow_shaped(&content) => {
+                        failures.push(format!("  {}: {}", entry.path().display(), e))
+                    }
+                    Err(_) => {}
                 }
             }
         }
     }
 
+    if !failures.is_empty() {
+        anyhow::bail!("{} flow file(s) failed to parse:\n{}", failures.len(), failures.join("\n"));
+    }
     Ok(flows)
+}
+
+/// One JSON file per flow; colliding names (same route/id) get a numeric suffix instead of overwriting.
+fn write_flows(dir: &Path, flows: &[Flow]) -> Result<()> {
+    let mut written = std::collections::HashSet::new();
+    for f in flows {
+        let clean_part = f.trigger.path.as_deref().unwrap_or(&f.id)
+            .replace(['/', '\\', ':', '<', '>', '"', '|', '?', '*', ' '], "_")
+            .replace(['{', '}'], "");
+        let base = format!("{}_{}_{}", f.domain_id, f.trigger.method.as_deref().unwrap_or("FLOW"), clean_part);
+        let mut name = base.clone();
+        let mut i = 2;
+        while !written.insert(name.to_lowercase()) {
+            name = format!("{base}_{i}");
+            i += 1;
+        }
+        fs::write(dir.join(format!("{name}.json")), serde_json::to_string_pretty(f)?)?;
+    }
+    Ok(())
+}
+
+fn is_flow_shaped(content: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(content)
+        .map(|v| v.get("trigger").is_some() && v.get("handler").is_some())
+        .unwrap_or(false)
 }
 
 fn load_annotations(path: &Path) -> Result<HashMap<String, FlowAnnotation>> {

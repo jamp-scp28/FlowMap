@@ -1,6 +1,6 @@
 [package]
 name = "flowmap"
-version = "0.1.0"
+version = "0.3.1"
 edition = "2021"
 description = "Behavior and flow mapping engine for C# and Rust codebases"
 authors = ["Jorge <jorge@users.noreply.github.com>"]

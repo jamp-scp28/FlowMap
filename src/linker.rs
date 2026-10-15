@@ -518,6 +518,10 @@ fn domain_description(domain_id: &str, name: &str) -> String {
 }
 
 fn clean_feature_flag(cond: &str) -> String {
+    // A quoted key is the flag: GetValue<bool>("Features:BetaCheckoutEnabled"), RequireFeature("X")
+    if let Some(key) = cond.split('"').nth(1).filter(|k| !k.is_empty()) {
+        return key.to_string();
+    }
     let mut s = cond
         .replace("RequireFeature(Feature.", "")
         .replace("RequireFeature(", "")
