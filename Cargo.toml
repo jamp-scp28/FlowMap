@@ -1,0 +1,19 @@
+[package]
+name = "flowmap"
+version = "0.1.0"
+edition = "2021"
+description = "Behavior and flow mapping engine for C# and Rust codebases"
+authors = ["Jorge <jorge@users.noreply.github.com>"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "cargo"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+walkdir = "2.5"
+syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+colored = "2.1"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"

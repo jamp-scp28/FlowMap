@@ -1,0 +1,1496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FlowMap | System Architecture & Behavior Explorer</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --panel: #111827;
+      --card: #182234;
+      --card-hover: #1f2d44;
+      --border: #24324a;
+      --border-accent: #3b82f6;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --heading: #f8fafc;
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.15);
+      --green: #4ade80;
+      --green-bg: rgba(74, 222, 128, 0.12);
+      --amber: #fbbf24;
+      --amber-bg: rgba(251, 191, 36, 0.12);
+      --red: #f87171;
+      --red-bg: rgba(248, 113, 113, 0.12);
+      --purple: #c084fc;
+      --purple-bg: rgba(192, 132, 252, 0.12);
+      --cyan: #22d3ee;
+      --cyan-bg: rgba(34, 211, 238, 0.12);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Sidebar Navigation */
+    #sidebar {
+      width: 380px;
+      min-width: 320px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+    .brand-box {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.2);
+    }
+    .brand-title {
+      font-size: 1.15rem;
+      font-weight: 800;
+      color: var(--heading);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      letter-spacing: -0.02em;
+    }
+    .brand-title span.badge-beta {
+      font-size: 0.65rem;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--accent-glow);
+      color: var(--accent);
+      border: 1px solid var(--accent);
+    }
+    .brand-subtitle {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Global Nav Tabs */
+    .global-nav {
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s ease;
+      background: transparent;
+      text-align: left;
+    }
+    .nav-link:hover {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--heading);
+    }
+    .nav-link.active {
+      background: var(--accent-glow);
+      color: var(--accent);
+      border-color: rgba(56, 189, 248, 0.3);
+    }
+    .nav-link .nav-icon { font-size: 1.1rem; }
+
+    /* Search & Filter */
+    .filter-box {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .filter-box input {
+      width: 100%;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--heading);
+      font-size: 0.85rem;
+      outline: none;
+    }
+    .filter-box input:focus { border-color: var(--accent); }
+
+    /* Domains Explorer List */
+    .sidebar-section-title {
+      padding: 12px 16px 6px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+    .domain-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 12px 20px;
+    }
+    .domain-item {
+      margin-bottom: 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+    .domain-header {
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      font-size: 0.86rem;
+      font-weight: 600;
+      color: var(--heading);
+      transition: background 0.15s;
+    }
+    .domain-header:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .domain-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .domain-count {
+      font-size: 0.72rem;
+      padding: 2px 7px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-muted);
+    }
+    .domain-scenarios {
+      display: flex;
+      flex-direction: column;
+      padding: 4px 8px 8px;
+      gap: 4px;
+      background: rgba(0, 0, 0, 0.15);
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .scenario-btn {
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      transition: all 0.12s;
+      border: 1px solid transparent;
+    }
+    .scenario-btn:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--heading);
+    }
+    .scenario-btn.active {
+      background: var(--accent-glow);
+      color: var(--accent);
+      font-weight: 600;
+      border-color: rgba(56, 189, 248, 0.3);
+    }
+    .method-badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    .method-POST { background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple); }
+    .method-GET { background: var(--green-bg); color: var(--green); border: 1px solid var(--green); }
+    .method-PATCH { background: var(--cyan-bg); color: var(--cyan); border: 1px solid var(--cyan); }
+    .method-PUT { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber); }
+    .method-DELETE { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); }
+
+    /* Main Content Area */
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow-y: auto;
+      padding: 28px 36px;
+      background: var(--bg);
+    }
+
+    /* Top Stats Header */
+    .hero-banner {
+      margin-bottom: 24px;
+      padding: 20px 24px;
+      background: linear-gradient(135deg, rgba(30, 41, 59, 0.8) 0%, rgba(17, 24, 39, 0.95) 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+    .hero-title { font-size: 1.45rem; font-weight: 800; color: var(--heading); letter-spacing: -0.02em; }
+    .hero-subtitle { font-size: 0.85rem; color: var(--text-muted); margin-top: 4px; }
+    .hero-stats { display: flex; gap: 20px; }
+    .stat-pill {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 6px 14px;
+      background: rgba(0, 0, 0, 0.25);
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .stat-val { font-size: 1.25rem; font-weight: 800; color: var(--accent); }
+    .stat-lbl { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-top: 2px; }
+
+    /* Views */
+    .view-container { display: none; }
+    .view-container.active { display: block; }
+
+    /* VIEW 1: DOMAIN ARCHITECTURE GRID */
+    .domain-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 20px;
+    }
+    .domain-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+    }
+    .domain-card:hover {
+      border-color: var(--border-accent);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+    .domain-card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .domain-card-icon {
+      font-size: 1.8rem;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 10px;
+      border-radius: 8px;
+    }
+    .domain-card-name { font-size: 1.1rem; font-weight: 700; color: var(--heading); }
+    .domain-card-desc { font-size: 0.82rem; color: var(--text-muted); line-height: 1.45; margin-bottom: 16px; }
+    .section-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
+    .pill-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .pill {
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .pill-write { border-color: rgba(248, 113, 113, 0.4); background: var(--red-bg); color: var(--red); font-weight: 600; }
+    .pill-read { border-color: rgba(56, 189, 248, 0.4); background: var(--accent-glow); color: var(--accent); }
+    .pill-dep { border-color: rgba(192, 132, 252, 0.4); background: var(--purple-bg); color: var(--purple); }
+
+    .domain-card-scenarios {
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .card-scenario-link {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.82rem;
+      padding: 6px 8px;
+      border-radius: 6px;
+      color: var(--heading);
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.02);
+      transition: background 0.12s;
+    }
+    .card-scenario-link:hover {
+      background: var(--accent-glow);
+      color: var(--accent);
+    }
+
+    /* VIEW 2: TOPOLOGY MAP */
+    .topology-table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .topology-table th, .topology-table td {
+      padding: 12px 16px;
+      text-align: left;
+      font-size: 0.85rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .topology-table th {
+      background: rgba(0, 0, 0, 0.25);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    .coupling-alert {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      background: var(--amber-bg);
+      color: var(--amber);
+      border: 1px solid var(--amber);
+      margin-left: 8px;
+    }
+    .copy-contract-btn {
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .copy-contract-btn:hover {
+      background: var(--accent);
+      color: #0b0f17;
+    }
+    .pill-event-local {
+      background: var(--green-bg);
+      color: var(--green);
+      border: 1px solid var(--green);
+    }
+    .pill-event-external {
+      background: var(--amber-bg);
+      color: var(--amber);
+      border: 1px solid var(--amber);
+    }
+    .flow-event-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      margin-bottom: 8px;
+    }
+    .flow-event-row:last-child {
+      margin-bottom: 0;
+    }
+
+    /* VIEW 3: FLOW INSPECTOR */
+    .flow-hero {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+    .flow-breadcrumbs {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .flow-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .flow-scenario-title {
+      font-size: 1.35rem;
+      font-weight: 800;
+      color: var(--heading);
+    }
+    .flow-endpoint-sub {
+      font-size: 0.88rem;
+      font-family: monospace;
+      color: var(--accent);
+      margin-top: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Contract Cards Grid */
+    .contract-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-bottom: 20px;
+    }
+    .contract-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+    }
+    .contract-card-title {
+      font-size: 0.82rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      padding-bottom: 6px;
+    }
+    .schema-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+    .schema-table th, .schema-table td {
+      padding: 6px 8px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .schema-table th { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; }
+    .req-badge { color: var(--red); font-weight: 700; font-size: 0.7rem; }
+    .opt-badge { color: var(--text-muted); font-size: 0.7rem; }
+
+    /* Execution Sinks & Steps */
+    .flow-section-title {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--heading);
+      margin: 24px 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .flow-steps-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .step-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+    }
+    .step-icon {
+      font-size: 1.2rem;
+      padding: 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      flex-shrink: 0;
+    }
+    .step-content { flex: 1; }
+    .step-kind-badge {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-right: 8px;
+    }
+    .step-heading { font-size: 0.9rem; font-weight: 700; color: var(--heading); }
+    .step-desc { font-size: 0.82rem; color: var(--text-muted); margin-top: 4px; font-family: monospace; }
+    .step-branches {
+      margin-top: 8px;
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 6px;
+      font-size: 0.8rem;
+    }
+
+    /* Mermaid Canvas */
+    .mermaid-box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 24px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Left Sidebar -->
+  <aside id="sidebar">
+    <div class="brand-box">
+      <div class="brand-title">
+        ⚡ FlowMap Explorer
+        <span class="badge-beta">Architecture</span>
+      </div>
+      <div class="brand-subtitle" id="repo-summary-text">System Behavioral Canvas</div>
+    </div>
+
+    <!-- Global Top Nav -->
+    <div class="global-nav">
+      <button class="nav-link active" onclick="switchView('architecture')">
+        <span class="nav-icon">🏛️</span>
+        <span>Domain Architecture</span>
+      </button>
+      <button class="nav-link" onclick="switchView('topology')">
+        <span class="nav-icon">🌐</span>
+        <span>Data & State Topology</span>
+      </button>
+      <button class="nav-link" onclick="switchView('events')">
+        <span class="nav-icon">⚡</span>
+        <span>Pub/Sub & Events Mesh</span>
+      </button>
+      <button class="nav-link" onclick="switchView('audit')">
+        <span class="nav-icon">🛡️</span>
+        <span>Architectural Audit</span>
+      </button>
+    </div>
+
+    <!-- Search filter -->
+    <div class="filter-box">
+      <input type="text" id="filter-input" placeholder="Search scenarios, tables, DTOs..." oninput="handleSearch(this.value)">
+    </div>
+
+    <!-- Bounded Contexts List -->
+    <div class="sidebar-section-title">Bounded Contexts & Scenarios</div>
+    <div class="domain-list" id="sidebar-domain-list">
+      <!-- Populated via JS -->
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main id="main">
+
+    <!-- Hero Stats Banner -->
+    <div class="hero-banner">
+      <div>
+        <div class="hero-title" id="hero-title">System Mental Map</div>
+        <div class="hero-subtitle" id="hero-subtitle">High-level architectural domains, state dependencies, and execution journeys.</div>
+      </div>
+      <div class="hero-stats">
+        <div class="stat-pill">
+          <div class="stat-val" id="stat-domains">0</div>
+          <div class="stat-lbl">Domains</div>
+        </div>
+        <div class="stat-pill">
+          <div class="stat-val" id="stat-scenarios">0</div>
+          <div class="stat-lbl">Journeys</div>
+        </div>
+        <div class="stat-pill">
+          <div class="stat-val" id="stat-tables">0</div>
+          <div class="stat-lbl">Entities</div>
+        </div>
+        <div class="stat-pill" onclick="switchView('events')" style="cursor: pointer;" title="Click to view Pub/Sub & Events Mesh">
+          <div class="stat-val" id="stat-events">0</div>
+          <div class="stat-lbl">Events Tracked</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIEW 1: DOMAIN ARCHITECTURE GRID -->
+    <div id="view-architecture" class="view-container active">
+      <div class="domain-grid" id="domain-cards-grid">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- VIEW 2: STATE TOPOLOGY MATRIX -->
+    <div id="view-topology" class="view-container">
+      <div style="margin-bottom: 16px;">
+        <h2 style="font-size: 1.2rem; color: var(--heading);">Database & State Topology Map</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">
+          Tracks which domains read vs mutate each core database table. If a table is modified across multiple domains, it is flagged as a shared state coupling hazard.
+        </p>
+      </div>
+      <table class="topology-table">
+        <thead>
+          <tr>
+            <th>Table / Entity</th>
+            <th>Owning Domains</th>
+            <th>Mutating Flows (Writers)</th>
+            <th>Reading Flows</th>
+          </tr>
+        </thead>
+        <tbody id="topology-tbody">
+          <!-- Rendered by JS -->
+        </tbody>
+      </table>
+    </div>
+
+    <!-- VIEW: EVENT & PUB/SUB TOPOLOGY -->
+    <div id="view-events" class="view-container">
+      <div style="margin-bottom: 16px;">
+        <h2 style="font-size: 1.2rem; color: var(--heading);">Domain Events & Pub/Sub Mesh</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">
+          Asynchronous domain events, message brokers, and background outbox queue topology across bounded contexts. Click any producer or consumer to inspect its execution journey, or copy the cross-repo contract for unconsumed events.
+        </p>
+      </div>
+      <table class="topology-table">
+        <thead>
+          <tr>
+            <th>Domain Event / Topic</th>
+            <th>Scope</th>
+            <th>Published By (Producers)</th>
+            <th>Consumed By (Handlers)</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="events-tbody">
+          <!-- Rendered by JS -->
+        </tbody>
+      </table>
+    </div>
+
+    <!-- VIEW 3: ARCHITECTURAL AUDIT -->
+    <div id="view-audit" class="view-container">
+      <div style="margin-bottom: 16px;">
+        <h2 style="font-size: 1.2rem; color: var(--heading);">Behavioral & Architectural Audit</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">
+          Verifies architectural integrity, dead event topics, premature state mutations, and uncovered validation branches.
+        </p>
+      </div>
+      <div id="audit-cards-container">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- VIEW 4: FLOW INSPECTOR -->
+    <div id="view-flow" class="view-container">
+      <div class="flow-hero">
+        <div class="flow-breadcrumbs" id="flow-breadcrumbs">
+          <span>Architecture</span> &gt; <span id="flow-crumb-domain">Domain</span> &gt; <span id="flow-crumb-scenario">Scenario</span>
+        </div>
+        <div class="flow-title-row">
+          <div>
+            <div class="flow-scenario-title" id="flow-scenario-name">Scenario Name</div>
+            <div class="flow-endpoint-sub">
+              <span class="method-badge" id="flow-method-badge">POST</span>
+              <span id="flow-route-path">/route</span>
+              <span style="color: var(--text-muted); font-size: 0.78rem;" id="flow-symbol-declared">src/api/handler.rs:1</span>
+            </div>
+          </div>
+          <button class="nav-link" style="border: 1px solid var(--border); padding: 6px 12px;" onclick="switchView('architecture')">
+            ← Back to Architecture
+          </button>
+        </div>
+      </div>
+
+      <!-- Contract & Signatures Grid -->
+      <div class="contract-grid">
+        <!-- Request DTO Card -->
+        <div class="contract-card">
+          <div class="contract-card-title">
+            <span>📥</span> Request DTO & Parameters
+          </div>
+          <div id="flow-request-contract-body">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <!-- Injected Dependencies & Response Card -->
+        <div class="contract-card">
+          <div class="contract-card-title">
+            <span>⚙️</span> Injected Services & Response Model
+          </div>
+          <div id="flow-response-contract-body">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Domain Events & Pub/Sub Linkage Card -->
+      <div class="contract-card" id="flow-events-card" style="margin-bottom: 20px; display: none;">
+        <div class="contract-card-title">
+          <span>⚡</span> Domain Events & Pub/Sub Linkage
+        </div>
+        <div id="flow-events-body">
+          <!-- Rendered by JS -->
+        </div>
+      </div>
+
+      <!-- State Mutations & Tables Touched -->
+      <div class="flow-section-title">
+        <span>💾</span> State Mutations & Database Sinks
+      </div>
+      <div id="flow-mutations-container" class="pill-list" style="margin-bottom: 20px;">
+        <!-- Rendered by JS -->
+      </div>
+
+      <!-- Decisions & Execution Path Timeline -->
+      <div class="flow-section-title">
+        <span>🔄</span> Execution Path & Decision Matrix
+      </div>
+      <div class="flow-steps-timeline" id="flow-steps-container">
+        <!-- Rendered by JS -->
+      </div>
+
+      <!-- Mermaid Visual Flowchart -->
+      <div class="flow-section-title">
+        <span>📊</span> Visual Wireframe Flowchart
+      </div>
+      <div class="mermaid-box">
+        <div class="mermaid" id="mermaid-canvas">
+          <!-- Rendered by Mermaid -->
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    const DATA = /*DATA_PLACEHOLDER*/{};
+
+    let currentView = 'architecture';
+    let currentFlowId = null;
+
+    window.addEventListener('DOMContentLoaded', () => {
+      initExplorer();
+    });
+
+    function initExplorer() {
+      // 1. Render Stats
+      const domainsCount = Object.keys(DATA.domains || {}).length;
+      const flowsCount = (DATA.flows || []).length;
+      const tablesCount = Object.keys(DATA.table_index || {}).length;
+      const eventsCount = Object.keys(DATA.event_index || {}).length;
+
+      document.getElementById('stat-domains').textContent = domainsCount;
+      document.getElementById('stat-scenarios').textContent = flowsCount;
+      document.getElementById('stat-tables').textContent = tablesCount;
+      document.getElementById('stat-events').textContent = eventsCount;
+
+      // 2. Render Sidebar
+      renderSidebarDomains();
+
+      // 3. Render Domain Grid
+      renderDomainGrid();
+
+      // 4. Render Topology Table
+      renderTopology();
+
+      // 5. Render Events Table
+      renderEvents();
+
+      // 6. Render Audit
+      renderAudit();
+    }
+
+    function switchView(viewName) {
+      currentView = viewName;
+      document.querySelectorAll('.view-container').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
+
+      const target = document.getElementById(`view-${viewName}`);
+      if (target) target.classList.add('active');
+
+      if (viewName === 'architecture') {
+        document.querySelector('.global-nav button:nth-child(1)').classList.add('active');
+        document.getElementById('hero-title').textContent = 'System Mental Map';
+        document.getElementById('hero-subtitle').textContent = 'High-level architectural domains, state dependencies, and execution journeys.';
+      } else if (viewName === 'topology') {
+        document.querySelector('.global-nav button:nth-child(2)').classList.add('active');
+        document.getElementById('hero-title').textContent = 'Data & State Topology';
+        document.getElementById('hero-subtitle').textContent = 'Cross-domain state coupling, database mutation highways, and shared table ownership.';
+      } else if (viewName === 'events') {
+        document.querySelector('.global-nav button:nth-child(3)').classList.add('active');
+        document.getElementById('hero-title').textContent = 'Domain Events & Pub/Sub Mesh';
+        document.getElementById('hero-subtitle').textContent = 'Cross-domain event pub/sub linkage, background outbox queues, and event schema contracts.';
+      } else if (viewName === 'audit') {
+        document.querySelector('.global-nav button:nth-child(4)').classList.add('active');
+        document.getElementById('hero-title').textContent = 'Architectural Audit';
+        document.getElementById('hero-subtitle').textContent = 'Behavioral invariants, unconsumed events, and validation completeness.';
+      }
+    }
+
+    function renderSidebarDomains() {
+      const container = document.getElementById('sidebar-domain-list');
+      container.innerHTML = '';
+
+      const domains = DATA.domains || {};
+      for (const [domId, dom] of Object.entries(domains)) {
+        const item = document.createElement('div');
+        item.className = 'domain-item';
+
+        const header = document.createElement('div');
+        header.className = 'domain-header';
+        header.innerHTML = `
+          <div class="domain-header-left">
+            <span>${dom.icon || '📦'}</span>
+            <span>${dom.name}</span>
+          </div>
+          <span class="domain-count">${dom.flows.length}</span>
+        `;
+        header.onclick = () => toggleDomainAccordion(domId);
+
+        const scenariosBox = document.createElement('div');
+        scenariosBox.className = 'domain-scenarios';
+        scenariosBox.id = `sidebar-scenarios-${domId}`;
+
+        for (const flowId of dom.flows) {
+          const flow = DATA.flows.find(f => f.id === flowId);
+          if (!flow) continue;
+
+          const method = flow.trigger.method || 'POST';
+          const btn = document.createElement('div');
+          btn.className = 'scenario-btn';
+          btn.id = `sidebar-btn-${escapeId(flow.id)}`;
+          btn.innerHTML = `
+            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${flow.scenario || flow.id}</span>
+            <span class="method-badge method-${method}">${method}</span>
+          `;
+          btn.onclick = () => selectFlow(flow.id);
+          scenariosBox.appendChild(btn);
+        }
+
+        item.appendChild(header);
+        item.appendChild(scenariosBox);
+        container.appendChild(item);
+      }
+    }
+
+    function toggleDomainAccordion(domId) {
+      const box = document.getElementById(`sidebar-scenarios-${domId}`);
+      if (box) {
+        box.style.display = box.style.display === 'none' ? 'flex' : 'none';
+      }
+    }
+
+    function renderDomainGrid() {
+      const grid = document.getElementById('domain-cards-grid');
+      grid.innerHTML = '';
+
+      const domains = DATA.domains || {};
+      for (const [domId, dom] of Object.entries(domains)) {
+        const card = document.createElement('div');
+        card.className = 'domain-card';
+
+        // Header
+        const header = `
+          <div class="domain-card-header">
+            <div class="domain-card-icon">${dom.icon || '📦'}</div>
+            <div>
+              <div class="domain-card-name">${dom.name}</div>
+              <div style="font-size: 0.75rem; color: var(--accent); font-weight: 600;">${dom.flows.length} business scenarios</div>
+            </div>
+          </div>
+          <div class="domain-card-desc">${dom.description || 'Core domain context.'}</div>
+        `;
+
+        // State Mutations
+        let tablesHtml = '<div class="section-label">Mutates Core Tables</div><div class="pill-list">';
+        if (dom.tables_written.length > 0) {
+          for (const tbl of dom.tables_written) {
+            tablesHtml += `<span class="pill pill-write">✎ ${tbl}</span>`;
+          }
+        } else {
+          tablesHtml += `<span class="pill" style="color: var(--text-muted);">None (read-only)</span>`;
+        }
+        tablesHtml += '</div>';
+
+        // Dependencies
+        let depsHtml = '<div class="section-label">Injected Services</div><div class="pill-list">';
+        if (dom.dependencies.length > 0) {
+          for (const dep of dom.dependencies.slice(0, 4)) {
+            depsHtml += `<span class="pill pill-dep">⚙ ${dep}</span>`;
+          }
+          if (dom.dependencies.length > 4) {
+            depsHtml += `<span class="pill pill-dep">+${dom.dependencies.length - 4} more</span>`;
+          }
+        } else {
+          depsHtml += `<span class="pill" style="color: var(--text-muted);">-</span>`;
+        }
+        depsHtml += '</div>';
+
+        // Key Scenarios
+        let scenariosHtml = '<div class="domain-card-scenarios"><div class="section-label">Key Business Journeys</div>';
+        for (const flowId of dom.flows.slice(0, 5)) {
+          const flow = DATA.flows.find(f => f.id === flowId);
+          if (!flow) continue;
+          const method = flow.trigger.method || 'POST';
+          scenariosHtml += `
+            <div class="card-scenario-link" onclick="selectFlow('${escapeAttr(flow.id)}')">
+              <span>${flow.scenario || flow.id}</span>
+              <span class="method-badge method-${method}">${method}</span>
+            </div>
+          `;
+        }
+        if (dom.flows.length > 5) {
+          scenariosHtml += `
+            <div style="font-size: 0.75rem; color: var(--accent); text-align: center; margin-top: 4px; cursor: pointer;" onclick="toggleDomainAccordion('${domId}')">
+              View all ${dom.flows.length} journeys →
+            </div>
+          `;
+        }
+        scenariosHtml += '</div>';
+
+        card.innerHTML = header + tablesHtml + depsHtml + scenariosHtml;
+        grid.appendChild(card);
+      }
+    }
+
+    function renderTopology() {
+      const tbody = document.getElementById('topology-tbody');
+      tbody.innerHTML = '';
+
+      const topology = DATA.entity_topology || [];
+      for (const node of topology) {
+        const tr = document.createElement('tr');
+
+        const isHazard = node.owners && node.owners.length > 1;
+        const hazardBadge = isHazard ? '<span class="coupling-alert">Shared State Coupling</span>' : '';
+
+        const ownersList = (node.owners || []).map(o => {
+          const d = DATA.domains ? DATA.domains[o] : null;
+          return `<span class="pill" style="font-weight: 600;">${d ? d.name : o}</span>`;
+        }).join(' ');
+
+        const writersList = (node.writers || []).map(w => {
+          const f = DATA.flows.find(x => x.id === w);
+          return `<div style="cursor: pointer; color: var(--heading);" onclick="selectFlow('${escapeAttr(w)}')">${f ? f.scenario : w}</div>`;
+        }).join('');
+
+        const readersList = (node.readers || []).map(r => {
+          const f = DATA.flows.find(x => x.id === r);
+          return `<div style="cursor: pointer; color: var(--text-muted);" onclick="selectFlow('${escapeAttr(r)}')">${f ? f.scenario : r}</div>`;
+        }).join('');
+
+        tr.innerHTML = `
+          <td><strong>${node.table}</strong> ${hazardBadge}</td>
+          <td>${ownersList || '-'}</td>
+          <td>${writersList || '<span style="color: var(--text-muted);">-</span>'}</td>
+          <td>${readersList || '<span style="color: var(--text-muted);">-</span>'}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderEvents() {
+      const tbody = document.getElementById('events-tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      const eventIndex = DATA.event_index || {};
+      const entries = Object.entries(eventIndex);
+
+      if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">No domain events or message queue topics detected.</td></tr>';
+        return;
+      }
+
+      for (const [evtName, info] of entries) {
+        const tr = document.createElement('tr');
+
+        const isLocal = info.is_consumed_locally;
+        const scopeBadge = isLocal 
+          ? '<span class="pill pill-event-local">🟢 Local Pub/Sub</span>' 
+          : '<span class="pill pill-event-external">🟠 External Contract</span>';
+
+        const publishersHtml = (info.publishers || []).map(pId => {
+          const f = (DATA.flows || []).find(x => x.id === pId);
+          const label = f ? `${f.scenario} (${f.trigger.method || 'ACTION'} ${f.trigger.path || f.id})` : pId;
+          return `<div style="cursor: pointer; color: var(--heading); margin-bottom: 4px;" onclick="selectFlow('${escapeAttr(pId)}')">📤 <strong>${label}</strong></div>`;
+        }).join('') || '<span style="color: var(--text-muted);">-</span>';
+
+        const consumersHtml = (info.consumers || []).map(cId => {
+          const f = (DATA.flows || []).find(x => x.id === cId);
+          const label = f ? `${f.scenario} (${f.handler.symbol})` : cId;
+          return `<div style="cursor: pointer; color: var(--cyan); margin-bottom: 4px;" onclick="selectFlow('${escapeAttr(cId)}')">📥 <strong>${label}</strong></div>`;
+        }).join('') || '<span style="color: var(--text-muted); font-style: italic;">No local consumer (cross-service)</span>';
+
+        const actionHtml = `<button class="copy-contract-btn" onclick="copyEventContract('${escapeAttr(evtName)}', this)">📋 Copy Contract</button>`;
+
+        tr.innerHTML = `
+          <td><strong><code>${evtName}</code></strong></td>
+          <td>${scopeBadge}</td>
+          <td>${publishersHtml}</td>
+          <td>${consumersHtml}</td>
+          <td>${actionHtml}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function copyEventContract(eventName, btn) {
+      const info = DATA.event_index ? DATA.event_index[eventName] : null;
+      const publishers = (info ? info.publishers : []).map(pId => {
+        const f = (DATA.flows || []).find(x => x.id === pId);
+        return {
+          flow_id: pId,
+          domain: f ? f.domain : null,
+          scenario: f ? f.scenario : null,
+          handler: f ? f.handler.symbol : null,
+          file: f ? f.handler.file : null,
+        };
+      });
+      const consumers = (info ? info.consumers : []).map(cId => {
+        const f = (DATA.flows || []).find(x => x.id === cId);
+        return {
+          flow_id: cId,
+          domain: f ? f.domain : null,
+          scenario: f ? f.scenario : null,
+          handler: f ? f.handler.symbol : null,
+          file: f ? f.handler.file : null,
+        };
+      });
+
+      const contract = {
+        "$schema": "https://flowmap.dev/schemas/v1/event-contract.json",
+        "event_type": eventName,
+        "is_consumed_locally": info ? info.is_consumed_locally : false,
+        "producers": publishers,
+        "consumers": consumers,
+        "generated_at": new Date().toISOString()
+      };
+
+      const text = JSON.stringify(contract, null, 2);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          if (btn) {
+            const original = btn.innerHTML;
+            btn.innerHTML = '✓ Copied!';
+            btn.style.background = 'var(--green-bg)';
+            btn.style.color = 'var(--green)';
+            btn.style.borderColor = 'var(--green)';
+            setTimeout(() => {
+              btn.innerHTML = original;
+              btn.style.background = '';
+              btn.style.color = '';
+              btn.style.borderColor = '';
+            }, 2000);
+          }
+        }).catch(err => {
+          console.error('Failed to copy event contract:', err);
+        });
+      } else {
+        prompt('Copy Event Contract JSON:', text);
+      }
+    }
+
+    function renderAudit() {
+      const container = document.getElementById('audit-cards-container');
+      container.innerHTML = '';
+
+      const stats = DATA.stats || {};
+      const unconsumed = stats.unconsumed_events || [];
+
+      if (unconsumed.length > 0) {
+        const card = document.createElement('div');
+        card.className = 'step-card';
+        card.style.borderColor = 'var(--amber)';
+        card.innerHTML = `
+          <div class="step-icon">⚠️</div>
+          <div class="step-content">
+            <span class="step-kind-badge" style="background: var(--amber-bg); color: var(--amber);">Hazard: Dead Event Topics</span>
+            <div class="step-heading">${unconsumed.length} Domain Event(s) Published with 0 Registered Consumers</div>
+            <div class="step-desc" style="margin-top: 6px;">
+              These domain events are emitted by business flows but have no registered subscriber or message broker listener:
+            </div>
+            <div class="pill-list" style="margin-top: 8px;">
+              ${unconsumed.map(e => `<span class="pill pill-write">${e}</span>`).join('')}
+            </div>
+          </div>
+        `;
+        container.appendChild(card);
+      }
+
+      // Card for state couplings
+      const hazardousEntities = (DATA.entity_topology || []).filter(e => e.owners && e.owners.length > 1);
+      if (hazardousEntities.length > 0) {
+        const card = document.createElement('div');
+        card.className = 'step-card';
+        card.style.borderColor = 'var(--cyan)';
+        card.innerHTML = `
+          <div class="step-icon">🌐</div>
+          <div class="step-content">
+            <span class="step-kind-badge" style="background: var(--cyan-bg); color: var(--cyan);">State Coupling Alert</span>
+            <div class="step-heading">${hazardousEntities.length} Database Table(s) Mutated Across Multiple Domains</div>
+            <div class="step-desc" style="margin-top: 6px;">
+              Altering schema or status lifecycles on these tables will ripple across domain boundaries:
+            </div>
+            <div class="pill-list" style="margin-top: 8px;">
+              ${hazardousEntities.map(e => `<span class="pill pill-write">${e.table} (mutated by ${e.owners.join(', ')})</span>`).join('')}
+            </div>
+          </div>
+        `;
+        container.appendChild(card);
+      }
+    }
+
+    function selectFlow(flowId) {
+      const flow = DATA.flows.find(f => f.id === flowId);
+      if (!flow) return;
+
+      currentFlowId = flowId;
+      switchView('flow');
+
+      // Update sidebar active highlights
+      document.querySelectorAll('.scenario-btn').forEach(b => b.classList.remove('active'));
+      const activeBtn = document.getElementById(`sidebar-btn-${escapeId(flow.id)}`);
+      if (activeBtn) activeBtn.classList.add('active');
+
+      // Breadcrumbs
+      document.getElementById('flow-crumb-domain').textContent = flow.domain || 'Domain';
+      document.getElementById('flow-crumb-scenario').textContent = flow.scenario || flow.id;
+      document.getElementById('flow-scenario-name').textContent = flow.scenario || flow.id;
+
+      const method = flow.trigger.method || 'POST';
+      const mBadge = document.getElementById('flow-method-badge');
+      mBadge.textContent = method;
+      mBadge.className = `method-badge method-${method}`;
+
+      document.getElementById('flow-route-path').textContent = flow.trigger.path || flow.id;
+      document.getElementById('flow-symbol-declared').textContent = flow.handler.file ? `${flow.handler.file}:${flow.handler.line}` : flow.handler.symbol;
+
+      // 1. Request DTO Contract
+      const reqBox = document.getElementById('flow-request-contract-body');
+      let reqHtml = '';
+      if (flow.contract && flow.contract.request_body) {
+        const rb = flow.contract.request_body;
+        reqHtml += `<div style="font-size: 0.82rem; font-weight: 700; color: var(--heading); margin-bottom: 6px;">Schema: <code>${rb.type_name}</code></div>`;
+        if (rb.fields && rb.fields.length > 0) {
+          reqHtml += `
+            <table class="schema-table">
+              <thead><tr><th>Field</th><th>Type</th><th>Req</th><th>Description</th></tr></thead>
+              <tbody>
+                ${rb.fields.map(f => `
+                  <tr>
+                    <td><strong>${f.name}</strong></td>
+                    <td><code style="color: var(--accent);">${f.field_type}</code></td>
+                    <td>${f.required ? '<span class="req-badge">YES</span>' : '<span class="opt-badge">OPT</span>'}</td>
+                    <td style="color: var(--text-muted);">${f.description || '-'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `;
+        }
+      } else {
+        reqHtml += `<div style="font-size: 0.8rem; color: var(--text-muted);">No Request Body Payload (URL Params or Parameterless).</div>`;
+      }
+
+      if (flow.contract && flow.contract.parameters && flow.contract.parameters.length > 0) {
+        reqHtml += `
+          <div style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin: 12px 0 4px;">Route & Query Parameters</div>
+          <table class="schema-table">
+            <thead><tr><th>Param</th><th>Source</th><th>Type</th></tr></thead>
+            <tbody>
+              ${flow.contract.parameters.map(p => `
+                <tr>
+                  <td><strong>${p.name}</strong></td>
+                  <td><span class="pill">${p.source}</span></td>
+                  <td><code style="color: var(--cyan);">${p.param_type || 'string'}</code></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      }
+      reqBox.innerHTML = reqHtml;
+
+      // 2. Response & Dependencies
+      const respBox = document.getElementById('flow-response-contract-body');
+      let respHtml = '';
+      if (flow.contract && flow.contract.response) {
+        const r = flow.contract.response;
+        respHtml += `
+          <div style="font-size: 0.82rem; font-weight: 700; color: var(--heading); margin-bottom: 6px;">
+            Returned Model: <code>${r.type_name || 'Standard Result'}</code>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;">
+            ${(r.status_codes || []).map(sc => `
+              <span class="pill ${sc.code < 300 ? 'pill-read' : sc.code === 404 ? 'pill-dep' : 'pill-write'}">
+                <strong>${sc.code}</strong> ${sc.description}
+              </span>
+            `).join('')}
+          </div>
+        `;
+      }
+
+      respHtml += `<div style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px;">Injected Services & Contexts</div>`;
+      if (flow.contract && flow.contract.dependencies && flow.contract.dependencies.length > 0) {
+        respHtml += `
+          <div class="pill-list">
+            ${flow.contract.dependencies.map(d => `
+              <span class="pill pill-dep" title="${d.source || ''}">⚙ ${d.name} (${d.kind})</span>
+            `).join('')}
+          </div>
+        `;
+      } else {
+        respHtml += `<div style="font-size: 0.8rem; color: var(--text-muted);">Standard Framework Context</div>`;
+      }
+      respBox.innerHTML = respHtml;
+
+      // 2b. Domain Events & Pub/Sub Linkage
+      const eventsCard = document.getElementById('flow-events-card');
+      const eventsBody = document.getElementById('flow-events-body');
+      const pubEvents = flow.coupling ? (flow.coupling.events_published || []) : [];
+      const conEvents = flow.coupling ? (flow.coupling.events_consumed || []) : [];
+
+      if (pubEvents.length > 0 || conEvents.length > 0) {
+        eventsCard.style.display = 'block';
+        let evHtml = '';
+
+        if (pubEvents.length > 0) {
+          evHtml += '<div style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px;">📤 Published Domain Events</div>';
+          for (const ev of pubEvents) {
+            const consumers = (flow.coupling.event_consumers && flow.coupling.event_consumers[ev]) || [];
+            const isLocal = consumers.length > 0;
+            evHtml += `
+              <div class="flow-event-row">
+                <div>
+                  <strong style="color: var(--heading); font-size: 0.88rem;"><code>${ev}</code></strong>
+                  <span class="pill ${isLocal ? 'pill-event-local' : 'pill-event-external'}" style="margin-left: 8px;">
+                    ${isLocal ? 'Local Pub/Sub' : 'External Contract'}
+                  </span>
+                  ${consumers.length > 0 ? `
+                    <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+                      <span style="font-size: 0.75rem; color: var(--text-muted);">Consumed by:</span>
+                      ${consumers.map(c => `
+                        <button class="pill pill-read" style="cursor: pointer;" onclick="selectFlow('${escapeAttr(c.flow_id)}')">
+                          ⚡ ${c.scenario} (${c.handler_symbol})
+                        </button>
+                      `).join('')}
+                    </div>
+                  ` : `
+                    <div style="margin-top: 4px; font-size: 0.78rem; color: var(--text-muted); font-style: italic;">
+                      No local consumer in this service (Cross-repository boundary).
+                    </div>
+                  `}
+                </div>
+                <div>
+                  <button class="copy-contract-btn" onclick="copyEventContract('${escapeAttr(ev)}', this)">📋 Copy Event Contract</button>
+                </div>
+              </div>
+            `;
+          }
+        }
+
+        if (conEvents.length > 0) {
+          if (pubEvents.length > 0) evHtml += '<div style="margin-top: 14px;"></div>';
+          evHtml += '<div style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px;">📥 Consumed Domain Events</div>';
+          for (const ev of conEvents) {
+            const producers = (flow.coupling.event_producers && flow.coupling.event_producers[ev]) || [];
+            evHtml += `
+              <div class="flow-event-row">
+                <div>
+                  <strong style="color: var(--heading); font-size: 0.88rem;"><code>${ev}</code></strong>
+                  <span class="pill pill-event-local" style="margin-left: 8px;">Event Listener / Consumer</span>
+                  ${producers.length > 0 ? `
+                    <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+                      <span style="font-size: 0.75rem; color: var(--text-muted);">Published by:</span>
+                      ${producers.map(p => `
+                        <button class="pill pill-dep" style="cursor: pointer;" onclick="selectFlow('${escapeAttr(p.flow_id)}')">
+                          ⚡ ${p.scenario} (${p.handler_symbol})
+                        </button>
+                      `).join('')}
+                    </div>
+                  ` : `
+                    <div style="margin-top: 4px; font-size: 0.78rem; color: var(--text-muted); font-style: italic;">
+                      Published externally or by background scheduler.
+                    </div>
+                  `}
+                </div>
+                <div>
+                  <button class="copy-contract-btn" onclick="copyEventContract('${escapeAttr(ev)}', this)">📋 Copy Event Contract</button>
+                </div>
+              </div>
+            `;
+          }
+        }
+
+        eventsBody.innerHTML = evHtml;
+      } else {
+        eventsCard.style.display = 'none';
+      }
+
+      // 3. State Mutations
+      const mutBox = document.getElementById('flow-mutations-container');
+      mutBox.innerHTML = '';
+      if (flow.tables_touched && flow.tables_touched.length > 0) {
+        for (const m of flow.tables_touched) {
+          const pill = document.createElement('span');
+          pill.className = `pill ${m.operation === 'SELECT' ? 'pill-read' : 'pill-write'}`;
+          pill.innerHTML = `<strong>${m.operation}</strong> ${m.table} ${m.transactional ? '(in transaction)' : ''}`;
+          mutBox.appendChild(pill);
+        }
+      } else {
+        mutBox.innerHTML = '<span class="pill" style="color: var(--text-muted);">No direct DB state mutations detected</span>';
+      }
+
+      // 4. Execution Steps Timeline
+      const stepsBox = document.getElementById('flow-steps-container');
+      stepsBox.innerHTML = '';
+
+      const allSteps = [...(flow.guards || []), ...(flow.steps || [])];
+      for (const step of allSteps) {
+        const card = document.createElement('div');
+        card.className = 'step-card';
+
+        let icon = '⚙️';
+        let badgeColor = 'var(--cyan)';
+        let badgeBg = 'var(--cyan-bg)';
+
+        if (step.kind === 'authn' || step.kind === 'authz') {
+          icon = '🛡️';
+          badgeColor = 'var(--amber)';
+          badgeBg = 'var(--amber-bg)';
+        } else if (step.kind === 'validation') {
+          icon = '📋';
+          badgeColor = 'var(--purple)';
+          badgeBg = 'var(--purple-bg)';
+        } else if (step.kind === 'db_write') {
+          icon = '💾';
+          badgeColor = 'var(--red)';
+          badgeBg = 'var(--red-bg)';
+        } else if (step.kind === 'db_read') {
+          icon = '🔍';
+          badgeColor = 'var(--accent)';
+          badgeBg = 'var(--accent-glow)';
+        } else if (step.step_type === 'loop') {
+          icon = '🔄';
+          badgeColor = 'var(--green)';
+          badgeBg = 'var(--green-bg)';
+        } else if (step.step_type === 'return') {
+          icon = '🏁';
+          badgeColor = 'var(--green)';
+          badgeBg = 'var(--green-bg)';
+        }
+
+        let branchesHtml = '';
+        if (step.branches && step.branches.length > 0) {
+          branchesHtml = `
+            <div class="step-branches">
+              <strong style="color: var(--amber);">Branches / Invariants:</strong>
+              <ul style="margin: 4px 0 0 16px;">
+                ${step.branches.map(b => `
+                  <li><strong>${b.when}</strong> → ${(b.steps || []).map(s => s.status || s.op || s.step_type).join(', ')}</li>
+                `).join('')}
+              </ul>
+            </div>
+          `;
+        }
+
+        card.innerHTML = `
+          <div class="step-icon">${icon}</div>
+          <div class="step-content">
+            <span class="step-kind-badge" style="background: ${badgeBg}; color: ${badgeColor};">${step.kind || step.step_type}</span>
+            <span class="step-heading">${step.condition || step.op || step.status || step.step_type}</span>
+            ${step.target ? `<div class="step-desc">Target: <strong>${step.target}</strong></div>` : ''}
+            ${step.note ? `<div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 4px;">${step.note}</div>` : ''}
+            ${branchesHtml}
+          </div>
+        `;
+        stepsBox.appendChild(card);
+      }
+
+      // 5. Render Mermaid Flowchart
+      renderFlowMermaid(flow);
+    }
+
+    function renderFlowMermaid(flow) {
+      const container = document.getElementById('mermaid-canvas');
+      let chart = 'flowchart TD\n';
+      chart += '  Start(["' + (flow.trigger.method || 'POST') + ' ' + (flow.trigger.path || flow.id) + '"]) --> Auth["🛡️ Auth & Security"]\n';
+      chart += '  Auth --> Valid["📋 Validate Payload & Invariants"]\n';
+
+      let lastNode = 'Valid';
+      let nodeIdx = 0;
+
+      for (const step of (flow.steps || [])) {
+        nodeIdx++;
+        const nodeId = `Step${nodeIdx}`;
+        if (step.step_type === 'loop') {
+          chart += `  ${lastNode} --> ${nodeId}{"🔄 ${escapeMermaid(step.condition || 'Retry Loop')}"}\n`;
+        } else if (step.kind === 'db_write') {
+          chart += `  ${lastNode} --> ${nodeId}["💾 ${escapeMermaid(step.op || 'DB Mutation: ' + step.target)}"]\n`;
+        } else if (step.kind === 'db_read') {
+          chart += `  ${lastNode} --> ${nodeId}["🔍 ${escapeMermaid(step.op || 'Query: ' + step.target)}"]\n`;
+        } else if (step.step_type === 'return') {
+          chart += `  ${lastNode} --> EndNode(["🏁 ${escapeMermaid(step.status || 'Response')}"])\n`;
+          lastNode = 'EndNode';
+          continue;
+        } else {
+          chart += `  ${lastNode} --> ${nodeId}["⚙️ ${escapeMermaid(step.op || step.condition || 'Process')}"]\n`;
+        }
+        lastNode = nodeId;
+      }
+
+      if (lastNode !== 'EndNode') {
+        chart += `  ${lastNode} --> EndNode(["🏁 200 OK / Success"])\n`;
+      }
+
+      chart += '  classDef default fill:#182234,stroke:#3b82f6,stroke-width:1px,color:#f8fafc;\n';
+      chart += '  classDef startEnd fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#38bdf8;\n';
+      chart += '  class Start,EndNode startEnd;\n';
+
+      container.removeAttribute('data-processed');
+      container.innerHTML = chart;
+
+      try {
+        mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+        mermaid.init(undefined, container);
+      } catch (e) {
+        console.warn('Mermaid rendering error:', e);
+      }
+    }
+
+    function handleSearch(query) {
+      const q = query.toLowerCase().trim();
+      const domainItems = document.querySelectorAll('.domain-item');
+
+      domainItems.forEach(item => {
+        const text = item.textContent.toLowerCase();
+        item.style.display = text.includes(q) ? 'block' : 'none';
+      });
+    }
+
+    function escapeId(str) {
+      return (str || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    }
+
+    function escapeAttr(str) {
+      return (str || '').replace(/'/g, "\\'");
+    }
+
+    function escapeMermaid(str) {
+      return (str || '').replace(/["()[\]{}]/g, '').slice(0, 40);
+    }
+  </script>
+</body>
+</html>

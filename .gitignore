@@ -1,0 +1,36 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# .NET / C# build artifacts
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+project.lock.json
+project.assets.json
+*.nuget.props
+*.nuget.targets
+*.nupkg
+*.snupkg
+TestResults/
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.vs/
+.idea/
+.vscode/
+*.swp
+*.bak
+*~
+*.code-workspace
+
+# Local test scratch & logs
+scratch/
+tmp/
+*.log
+flows/
+dist/
