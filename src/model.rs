@@ -121,6 +121,7 @@ pub struct HandlerInfo {
     pub symbol: String,
     pub file: String,
     pub line: usize,
+    #[serde(default)]
     pub signature: String,
 }
 
@@ -232,7 +233,7 @@ pub struct EventCoupling {
     pub is_consumed_locally: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowMapStats {
     pub total_flows: usize,
     pub total_decisions: usize,

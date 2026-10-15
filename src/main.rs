@@ -16,6 +16,7 @@ use cli::{Cli, Commands};
 use colored::*;
 use diff::FlowDiffer;
 use extractors::csharp::CSharpExtractor;
+use extractors::python::PythonExtractor;
 use extractors::rust::RustExtractor;
 use html::HtmlGenerator;
 use impact::ImpactAnalyzer;
@@ -25,7 +26,7 @@ use model::{ConnectedFlowMap, Flow, FlowAnnotation, Step};
 use query::QueryEngine;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
@@ -39,9 +40,20 @@ fn main() -> Result<()> {
             html,
             md,
             annotations,
+            multi,
         } => {
             println!("{}", "Building Connected FlowMap...".bold().bright_blue());
-            let flows = load_flows_from_dir(&flows_dir)?;
+            let flows = if let Some(ref sources) = multi {
+                let mut all_flows = Vec::new();
+                for src in sources {
+                    println!("Loading flows from: {}", src.display());
+                    let mut src_flows = collect_flows_from_source(src)?;
+                    all_flows.append(&mut src_flows);
+                }
+                all_flows
+            } else {
+                load_flows_from_dir(&flows_dir)?
+            };
             println!("Loaded {} raw flow definition(s).", flows.len().to_string().bold());
 
             let annotations_map = if let Some(ann_path) = annotations {
@@ -98,11 +110,33 @@ fn main() -> Result<()> {
             let raw_flows_dir = target_dir.join("raw");
             fs::create_dir_all(&raw_flows_dir)?;
 
-            // 1. Detect language
-            let is_rust = repo.join("Cargo.toml").exists();
-            let is_csharp = WalkDir::new(&repo).max_depth(3).into_iter().filter_map(|e| e.ok()).any(|e| {
-                e.path().extension().map_or(false, |ext| ext == "csproj" || ext == "sln")
-            });
+            // 1. Detect language (supports nested solution/project hierarchies)
+            let is_rust = repo.join("Cargo.toml").exists()
+                || WalkDir::new(&repo)
+                    .max_depth(6)
+                    .into_iter()
+                    .filter_entry(|e| !is_ignored_scan_dir(e))
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.file_name() == "Cargo.toml");
+
+            let csharp_entry = WalkDir::new(&repo)
+                .max_depth(8)
+                .into_iter()
+                .filter_entry(|e| !is_ignored_scan_dir(e))
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.path().extension().map_or(false, |ext| ext == "csproj" || ext == "sln")
+                });
+
+            let is_python = repo.join("requirements.txt").exists()
+                || repo.join("pyproject.toml").exists()
+                || repo.join("setup.py").exists()
+                || WalkDir::new(&repo)
+                    .max_depth(6)
+                    .into_iter()
+                    .filter_entry(|e| !is_ignored_scan_dir(e))
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.path().extension().map_or(false, |ext| ext == "py"));
 
             if is_rust {
                 println!("Detected Rust project (Cargo.toml). Running Native Rust Extractor...");
@@ -124,11 +158,14 @@ fn main() -> Result<()> {
                     fs::write(&file_path, serde_json::to_string_pretty(f)?)?;
                 }
                 println!("Extracted {} Rust flows to: {}", flows.len().to_string().bold(), raw_flows_dir.display());
-            } else if is_csharp {
-                println!("Detected C# project (.csproj/.sln). Running C# Roslyn Extractor...");
+            } else if let Some(ref cs) = csharp_entry {
+                println!("Detected C# project ({}). Running C# Roslyn Extractor...", cs.path().display());
                 CSharpExtractor::run(&repo, &raw_flows_dir, refs.as_deref(), None)?;
+            } else if is_python {
+                println!("Detected Python project. Running Python AST Extractor...");
+                PythonExtractor::run(&repo, &raw_flows_dir)?;
             } else {
-                anyhow::bail!("Could not automatically determine project type in '{}'. Expected Cargo.toml or .csproj/.sln.", repo.display());
+                anyhow::bail!("Could not automatically determine project type in '{}'. Expected Cargo.toml, .csproj/.sln, or Python files.", repo.display());
             }
 
             // 2. Build connected flowmap
@@ -173,28 +210,38 @@ fn main() -> Result<()> {
         }
 
         Commands::Explore { html, rebuild } => {
-            if rebuild || !html.exists() {
+            let actual_html = if html.exists() {
+                html
+            } else if Path::new("flows/index.html").exists() {
+                PathBuf::from("flows/index.html")
+            } else if Path::new("flows/flowmap.html").exists() {
+                PathBuf::from("flows/flowmap.html")
+            } else {
+                html
+            };
+
+            if rebuild || !actual_html.exists() {
                 println!("Rebuilding flowmap before launch...");
                 let flows = load_flows_from_dir(Path::new("flows"))?;
                 let connected = Linker::build(flows, HashMap::new());
-                HtmlGenerator::generate(&connected, &html)?;
+                HtmlGenerator::generate(&connected, &actual_html)?;
             }
 
-            println!("Opening interactive explorer in browser: {}", html.display().to_string().bright_green());
+            println!("Opening interactive explorer in browser: {}", actual_html.display().to_string().bright_green());
 
             #[cfg(target_os = "windows")]
             {
                 Command::new("cmd")
-                    .args(["/C", "start", &html.to_string_lossy()])
+                    .args(["/C", "start", &actual_html.to_string_lossy()])
                     .spawn()?;
             }
             #[cfg(target_os = "macos")]
             {
-                Command::new("open").arg(&html).spawn()?;
+                Command::new("open").arg(&actual_html).spawn()?;
             }
             #[cfg(target_os = "linux")]
             {
-                Command::new("xdg-open").arg(&html).spawn()?;
+                Command::new("xdg-open").arg(&actual_html).spawn()?;
             }
         }
 
@@ -307,8 +354,15 @@ fn main() -> Result<()> {
                 }
                 println!("Extracted {} Rust flows to: {}", flows.len().to_string().bold(), out.display().to_string().bright_green());
             }
+            "python" | "py" => {
+                println!("{}", "Running Python AST Extractor...".bold().bright_blue());
+                fs::create_dir_all(&out)?;
+                PythonExtractor::run(&project, &out)?;
+                let flows = load_flows_from_dir(&out)?;
+                println!("Extracted {} Python flows to: {}", flows.len().to_string().bold(), out.display().to_string().bright_green());
+            }
             other => {
-                eprintln!("Unsupported language: '{}'. Supported: 'csharp', 'rust'.", other.red());
+                eprintln!("Unsupported language: '{}'. Supported: 'csharp', 'rust', 'python'.", other.red());
                 std::process::exit(1);
             }
         },
@@ -406,6 +460,59 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+
+        Commands::Federate {
+            services,
+            out,
+            html,
+            md,
+        } => {
+            println!("{}", "Federating Cross-Repository Service Mesh...".bold().bright_blue());
+            let mut all_flows = Vec::new();
+            for src in &services {
+                println!("Loading service from: {}", src.display().to_string().bright_cyan());
+                let mut src_flows = collect_flows_from_source(src)?;
+                println!("  -> Discovered {} flow(s)", src_flows.len());
+                all_flows.append(&mut src_flows);
+            }
+
+            println!("\nStitching {} total flows across {} service(s)...", all_flows.len().to_string().bold(), services.len());
+            let connected = Linker::build(all_flows, HashMap::new());
+
+            let json = serde_json::to_string_pretty(&connected)?;
+            fs::write(&out, json)?;
+            println!("Wrote federated graph dataset to: {}", out.display().to_string().bright_green());
+
+            let md_content = MarkdownGenerator::generate(&connected, "Federated Mesh");
+            fs::write(&md, md_content)?;
+            println!("Wrote Federated Flowbook to:      {}", md.display().to_string().bright_green());
+
+            HtmlGenerator::generate(&connected, &html)?;
+            println!("Wrote Federated Explorer to:      {}", html.display().to_string().bright_green());
+
+            // Summary Stats
+            println!("\n{}", "------------ FEDERATION STATS ------------".bright_black());
+            println!("Total Flows:          {}", connected.stats.total_flows.to_string().bold());
+            println!("Decisions (Branches): {}", connected.stats.total_decisions.to_string().bold());
+            println!("Effects (Sinks):      {}", connected.stats.total_effects.to_string().bold());
+            println!("DB Tables Tracked:    {}", connected.stats.total_tables_tracked.to_string().bold());
+            println!("Events Tracked:       {}", connected.stats.total_events_tracked.to_string().bold());
+            println!("Feature Flags:        {}", connected.stats.total_flags_tracked.to_string().bold());
+
+            if !connected.stats.unconsumed_events.is_empty() {
+                println!(
+                    "{} {} unconsumed events across federated mesh:",
+                    "WARNING:".bold().yellow(),
+                    connected.stats.unconsumed_events.len()
+                );
+                for ev in &connected.stats.unconsumed_events {
+                    println!("  * {}", ev.yellow());
+                }
+            } else {
+                println!("{}", "All cross-service events are linked to consumers!".bold().bright_green());
+            }
+            println!("{}", "------------------------------------------".bright_black());
+        }
     }
 
     Ok(())
@@ -493,9 +600,15 @@ fn retrieve_git_baseline(against: &str, flows_dir: &str) -> Result<ConnectedFlow
 
 fn scan_repo_internal(repo: &Path) -> Result<ConnectedFlowMap> {
     let is_rust = repo.join("Cargo.toml").exists();
-    let is_csharp = WalkDir::new(repo).max_depth(3).into_iter().filter_map(|e| e.ok()).any(|e| {
+    let is_csharp = WalkDir::new(repo).max_depth(4).into_iter().filter_map(|e| e.ok()).any(|e| {
         e.path().extension().map_or(false, |ext| ext == "csproj" || ext == "sln")
     });
+    let is_python = repo.join("requirements.txt").exists()
+        || repo.join("pyproject.toml").exists()
+        || repo.join("setup.py").exists()
+        || WalkDir::new(repo).max_depth(4).into_iter().filter_map(|e| e.ok()).any(|e| {
+            e.path().extension().map_or(false, |ext| ext == "py")
+        });
 
     let flows = if is_rust {
         let src_dir = repo.join("src");
@@ -508,11 +621,82 @@ fn scan_repo_internal(repo: &Path) -> Result<ConnectedFlowMap> {
         let f = load_flows_from_dir(&temp_dir)?;
         let _ = fs::remove_dir_all(&temp_dir);
         f
+    } else if is_python {
+        let temp_dir = std::env::temp_dir().join(format!("flowmap_extract_py_{}", uuid_simple()));
+        fs::create_dir_all(&temp_dir)?;
+        PythonExtractor::run(repo, &temp_dir)?;
+        let f = load_flows_from_dir(&temp_dir)?;
+        let _ = fs::remove_dir_all(&temp_dir);
+        f
     } else {
-        anyhow::bail!("Could not determine project type in '{}'. Expected Cargo.toml or .csproj/.sln.", repo.display());
+        anyhow::bail!("Could not determine project type in '{}'. Expected Cargo.toml, .csproj/.sln, or Python files.", repo.display());
     };
 
     Ok(Linker::build(flows, HashMap::new()))
+}
+
+fn collect_flows_from_source(source: &Path) -> Result<Vec<Flow>> {
+    if !source.exists() {
+        anyhow::bail!("Target path '{}' does not exist.", source.display());
+    }
+
+    if source.is_file() {
+        if let Ok(content) = fs::read_to_string(source) {
+            if let Ok(map) = serde_json::from_str::<ConnectedFlowMap>(&content) {
+                return Ok(map.flows);
+            }
+            if let Ok(flows) = serde_json::from_str::<Vec<Flow>>(&content) {
+                return Ok(flows);
+            }
+            if let Ok(flow) = serde_json::from_str::<Flow>(&content) {
+                return Ok(vec![flow]);
+            }
+        }
+        anyhow::bail!("Could not parse JSON flows from file '{}'.", source.display());
+    }
+
+    // Directory
+    let in_flows_json = source.join("flows").join("flowmap.json");
+    if in_flows_json.exists() {
+        let content = fs::read_to_string(&in_flows_json)?;
+        if let Ok(map) = serde_json::from_str::<ConnectedFlowMap>(&content) {
+            return Ok(map.flows);
+        }
+    }
+
+    let direct_json = source.join("flowmap.json");
+    if direct_json.exists() {
+        let content = fs::read_to_string(&direct_json)?;
+        if let Ok(map) = serde_json::from_str::<ConnectedFlowMap>(&content) {
+            return Ok(map.flows);
+        }
+    }
+
+    let raw_dir = source.join("flows").join("raw");
+    if raw_dir.exists() {
+        let flows = load_flows_from_dir(&raw_dir)?;
+        if !flows.is_empty() {
+            return Ok(flows);
+        }
+    }
+
+    let flows_dir = source.join("flows");
+    if flows_dir.exists() {
+        let flows = load_flows_from_dir(&flows_dir)?;
+        if !flows.is_empty() {
+            return Ok(flows);
+        }
+    }
+
+    let direct_flows = load_flows_from_dir(source)?;
+    if !direct_flows.is_empty() {
+        return Ok(direct_flows);
+    }
+
+    // Auto-scan if source is a source directory
+    println!("No existing flows found in '{}'. Running automatic scan...", source.display());
+    let connected = scan_repo_internal(source)?;
+    Ok(connected.flows)
 }
 
 fn uuid_simple() -> String {
@@ -554,11 +738,48 @@ fn load_annotations(path: &Path) -> Result<HashMap<String, FlowAnnotation>> {
     Ok(map)
 }
 
+fn is_ignored_scan_dir(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    name == ".git"
+        || name == "target"
+        || name == "bin"
+        || name == "obj"
+        || name == "node_modules"
+        || name == "packages"
+        || name == ".vs"
+        || name == ".idea"
+}
+
+fn resolve_flowmap_path(path: &Path) -> PathBuf {
+    if path.exists() {
+        if path.is_dir() {
+            let in_flows = path.join("flows").join("flowmap.json");
+            if in_flows.exists() {
+                return in_flows;
+            }
+            let direct = path.join("flowmap.json");
+            if direct.exists() {
+                return direct;
+            }
+        }
+        return path.to_path_buf();
+    }
+    // Check if relative to "flows" subdirectory when default "flowmap.json" was provided
+    if path == Path::new("flowmap.json") {
+        let in_flows = Path::new("flows").join("flowmap.json");
+        if in_flows.exists() {
+            return in_flows;
+        }
+    }
+    path.to_path_buf()
+}
+
 fn load_connected_map(path: &Path) -> Result<ConnectedFlowMap> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Could not read flowmap file at '{}'", path.display()))?;
+    let resolved = resolve_flowmap_path(path);
+    let content = fs::read_to_string(&resolved)
+        .with_context(|| format!("Could not read flowmap file at '{}' (checked '{}')", path.display(), resolved.display()))?;
     let map = serde_json::from_str(&content)
-        .with_context(|| format!("Invalid flowmap JSON structure in '{}'", path.display()))?;
+        .with_context(|| format!("Invalid flowmap JSON structure in '{}'", resolved.display()))?;
     Ok(map)
 }
 

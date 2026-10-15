@@ -33,6 +33,10 @@ pub enum Commands {
         /// Optional path to annotations.json
         #[arg(short, long)]
         annotations: Option<PathBuf>,
+
+        /// Multiple repo roots, flow directories, or flowmap.json files to federate
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        multi: Option<Vec<PathBuf>>,
     },
 
     /// Automatically scan and map a repository, saving results into <repo>/flows/
@@ -112,9 +116,9 @@ pub enum Commands {
         search: Option<String>,
     },
 
-    /// Run native code extractors against a target C# or Rust project
+    /// Run native code extractors against a target C#, Rust, or Python project
     Extract {
-        /// Language of the target codebase: 'csharp' or 'rust'
+        /// Language of the target codebase: 'csharp', 'rust', or 'python'
         #[arg(short, long)]
         lang: String,
 
@@ -188,5 +192,24 @@ pub enum Commands {
         /// Exit with non-zero code if breaking behavioral changes or critical hazards are detected
         #[arg(long)]
         strict: bool,
+    },
+
+    /// Federate and stitch multiple repositories/services into a single connected cross-service mesh
+    Federate {
+        /// List of repository directories, flow folders, or flowmap.json files to combine
+        #[arg(required = true, num_args = 1..)]
+        services: Vec<PathBuf>,
+
+        /// Output path for the federated flowmap JSON (default: federated_flowmap.json)
+        #[arg(short, long, default_value = "federated_flowmap.json")]
+        out: PathBuf,
+
+        /// Output path for the federated HTML explorer (default: federated_flowmap.html)
+        #[arg(long, default_value = "federated_flowmap.html")]
+        html: PathBuf,
+
+        /// Output path for the federated Markdown Flowbook (default: FEDERATED_FLOWS.md)
+        #[arg(long, default_value = "FEDERATED_FLOWS.md")]
+        md: PathBuf,
     },
 }

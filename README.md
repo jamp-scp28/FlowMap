@@ -3,9 +3,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
 [![.NET](https://img.shields.io/badge/.NET-9.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Release](https://img.shields.io/badge/Release-v0.1.0-brightgreen.svg)](https://github.com/jamp-scp28/FlowMap/releases)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Release](https://img.shields.io/badge/Release-v0.3.0-brightgreen.svg)](https://github.com/jamp-scp28/FlowMap/releases)
 
-**FlowMap** is a high-precision, autonomous behavioral and architectural mapping engine for **C# (.NET / Roslyn)** and **Rust (syn AST / Diesel / Axum)** codebases.
+**FlowMap** is a high-precision, autonomous behavioral and architectural mapping engine for **C# (.NET / Roslyn)**, **Rust (syn AST / Diesel / Axum)**, and **Python (FastAPI / Starlette / Celery)** codebases.
 
 > [!IMPORTANT]
 > **100% Local-First & Static Analysis Privacy Guarantee**
@@ -157,9 +158,20 @@ flowmap query --event SevereWeatherAlertEvent
 flowmap query --flag EnableAdvancedForecasts
 ```
 
-### 5. Inspecting a Specific Flow
+### 6. Inspecting a Specific Flow
 ```bash
 flowmap show "RecordReading"
+```
+
+### 7. Cross-Repository Pub/Sub Mesh Federation (`flowmap federate`)
+Stitch together microservices spanning different repositories and languages (C#, Rust, Python) into a unified behavioral topology:
+
+```bash
+# Federate multiple microservice repos or flowmaps
+flowmap federate ../order-service ../warehouse-service ../notification-service --out federated_flowmap.json
+
+# Query publishers and consumers across repo boundaries
+flowmap query --map federated_flowmap.json --event OrderSubmittedIntegrationEvent
 ```
 
 ---
@@ -169,7 +181,7 @@ flowmap show "RecordReading"
 ```
 FlowMap/
 ├── src/
-│   ├── main.rs                  # CLI command routing (scan, impact, diff, check, build, query)
+│   ├── main.rs                  # CLI command routing (scan, impact, diff, check, build, query, federate)
 │   ├── model.rs                 # Core domain graph model (Flow, Coupling, EventCoupling, Steps)
 │   ├── linker.rs                # Graph linker, domain inference, event mesh & coupling indexer
 │   ├── markdown.rs              # FLOWS.md generator with native Mermaid syntax & decision tables
@@ -181,11 +193,14 @@ FlowMap/
 │   ├── check.rs                 # Architectural integrity & behavioral auditor
 │   └── extractors/
 │       ├── rust.rs              # Native Rust AST extractor (syn, Diesel, Axum, utoipa, workers)
-│       └── csharp.rs            # C# extractor bridge & standalone runner
+│       ├── csharp.rs            # C# extractor bridge & standalone runner
+│       └── python.rs            # Python AST extractor bridge (FastAPI, Celery, EventBus)
 ├── extractors/
 │   └── csharp/                  # Roslyn AST extractor (.NET 9)
 │       ├── Program.cs           # Deep method inlining, DI resolution, EF Core & domain event visitor
 │       └── CSharpFlowExtractor.csproj
+│   └── python/
+│       └── extractor.py         # Standard library AST visitor for Python microservices
 ├── skill/
 │   └── SKILL.md                 # Antigravity / AI Agent Pair Programming Skill definition
 └── Cargo.toml

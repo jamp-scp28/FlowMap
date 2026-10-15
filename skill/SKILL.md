@@ -1,21 +1,21 @@
 ---
 name: flowmap
 description: >-
-  Behavior and Flow Mapping engine for C# and Rust codebases. Use to extract execution paths,
+  Behavior and Flow Mapping engine for C#, Rust, and Python codebases. Use to extract execution paths,
   build connected behavior graphs, inspect feature flags, audit architectural hazards, compute
-  blast radius / impact analysis before and after code changes, and detect breaking regressions.
+  blast radius / impact analysis before and after code changes, federate cross-repo microservices, and detect breaking regressions.
 ---
 
 # FlowMap Agent Skill
 
 FlowMap provides **behavioral code understanding** (Action X &rarr; Results Y, Z), replacing the bottleneck
 of line-by-line review. It models:
-- Entry points (HTTP routes, event consumers)
+- Entry points (HTTP routes, event consumers, background jobs)
 - Deep decision logic (feature flags, validations, role checks, state conditions)
 - Sinks (DB writes, DB reads, external HTTP calls, published domain events)
 - Cross-flow coupling (shared database tables, event mesh, flag blast radius)
 
-The CLI binary `flowmap.exe` (and its companion `CSharpFlowExtractor.exe`) can be placed in your `PATH` or invoked directly.
+The CLI binary `flowmap.exe` (and its companion extractors) can be placed in your `PATH` or invoked directly.
 
 > [!IMPORTANT]
 > **Privacy & Local Execution:** FlowMap operates 100% locally and offline via static AST parsing. It transmits no telemetry or data. When acting as an AI pair-programmer, never read or transmit files containing secrets, API keys, `.env`, or connection strings.
@@ -37,9 +37,9 @@ When the user asks: *"Map this repository"* or *"Help me understand the flows in
    flowmap scan ./services/weather-api
    ```
    The scanner automatically:
-   - Detects the project technology (C# `.csproj/.sln` or Rust `Cargo.toml`).
-   - Recursively traverses deep method call chains, dependency injection interfaces, and domain aggregate roots.
-   - Discovers HTTP routes, background queue workers, and event handlers (`IEventHandler<T>`, `IConsumer<T>`).
+   - Detects the project technology (C# `.csproj/.sln`, Rust `Cargo.toml`, or Python `requirements.txt/pyproject.toml/.py`).
+   - Recursively traverses deep method call chains, dependency injection interfaces, MediatR handlers, and domain aggregate roots.
+   - Discovers HTTP routes, background queue workers, and event handlers (`IEventHandler<T>`, `IConsumer<T>`, `@subscribe`, Celery tasks).
    - Links bidirectional Pub/Sub topology (Producers ➔ Domain Events ➔ Handlers).
    - Generates clean, zero-pollution artifacts strictly inside `<repo>/flows/`:
      - `<repo>/flows/FLOWS.md` (Markdown flowbook with Mermaid diagrams & decision matrices)
@@ -122,3 +122,14 @@ flowmap query --flag EnableAdvancedForecasts
 # Search by keyword
 flowmap query --search telemetry
 ```
+
+---
+
+### Workflow 6: Cross-Repository Pub/Sub Mesh Federation (`flowmap federate`)
+
+When working across multiple microservices (e.g., Service A emits an event consumed by Service B):
+
+```bash
+flowmap federate ../order-service ../warehouse-service ../billing-service --out federated_flowmap.json
+```
+This stitches the event publishers in Service A with the subscribers in Service B, eliminates false dead-event warnings, and identifies shared cross-service database coupling.

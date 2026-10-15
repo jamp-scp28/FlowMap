@@ -55,12 +55,22 @@ impl Linker {
                 }
             }
 
+            // Index configs_and_flags
+            for cfg in &flow.configs_and_flags {
+                let clean = clean_feature_flag(&cfg.name);
+                if !clean.is_empty() {
+                    flag_map.entry(clean).or_default().insert(flow.id.clone());
+                }
+            }
+
             // Index guards
             for guard in &flow.guards {
-                if guard.kind.as_deref() == Some("feature_flag") {
+                if guard.kind.as_deref() == Some("feature_flag") || guard.kind.as_deref() == Some("config") {
                     if let Some(cond) = &guard.condition {
                         let clean_flag = clean_feature_flag(cond);
-                        flag_map.entry(clean_flag).or_default().insert(flow.id.clone());
+                        if !clean_flag.is_empty() {
+                            flag_map.entry(clean_flag).or_default().insert(flow.id.clone());
+                        }
                     }
                 }
             }
@@ -77,26 +87,42 @@ impl Linker {
                 &mut total_effects,
             );
 
-            // Also check coupling declared on the flow
+            // Also check coupling declared on the flow (filter empty strings and DbContext)
             for r in &flow.coupling.reads {
-                table_map.entry(r.clone()).or_default().0.insert(flow.id.clone());
+                let trimmed = r.trim();
+                if !trimmed.is_empty() && trimmed != "DbContext" {
+                    table_map.entry(trimmed.to_string()).or_default().0.insert(flow.id.clone());
+                }
             }
             for w in &flow.coupling.writes {
-                table_map.entry(w.clone()).or_default().1.insert(flow.id.clone());
+                let trimmed = w.trim();
+                if !trimmed.is_empty() && trimmed != "DbContext" {
+                    table_map.entry(trimmed.to_string()).or_default().1.insert(flow.id.clone());
+                }
             }
             for p in &flow.coupling.events_published {
-                event_map.entry(p.clone()).or_default().0.insert(flow.id.clone());
+                let trimmed = p.trim();
+                if !trimmed.is_empty() && trimmed != "\"\"" {
+                    event_map.entry(trimmed.to_string()).or_default().0.insert(flow.id.clone());
+                }
             }
             for c in &flow.coupling.events_consumed {
-                event_map.entry(c.clone()).or_default().1.insert(flow.id.clone());
+                let trimmed = c.trim();
+                if !trimmed.is_empty() && trimmed != "\"\"" {
+                    event_map.entry(trimmed.to_string()).or_default().1.insert(flow.id.clone());
+                }
             }
             for s in &flow.coupling.calls_services {
                 let svc = clean_service_name(s);
-                service_map.entry(svc).or_default().insert(flow.id.clone());
+                if !svc.is_empty() {
+                    service_map.entry(svc).or_default().insert(flow.id.clone());
+                }
             }
             for dep in &flow.contract.dependencies {
                 if dep.kind == "client" || dep.kind == "service" {
-                    service_map.entry(dep.name.clone()).or_default().insert(flow.id.clone());
+                    if !dep.name.is_empty() {
+                        service_map.entry(dep.name.clone()).or_default().insert(flow.id.clone());
+                    }
                 }
             }
         }
@@ -198,12 +224,18 @@ impl Linker {
         let mut event_index = BTreeMap::new();
         let mut unconsumed_events = Vec::new();
         for (evt, (pubs, cons)) in &event_map {
+            let evt_trimmed = evt.trim();
+            if evt_trimmed.is_empty() || evt_trimmed == "\"\"" {
+                continue;
+            }
             let mut p_vec: Vec<String> = pubs.iter().cloned().collect();
             let mut c_vec: Vec<String> = cons.iter().cloned().collect();
             p_vec.sort();
             c_vec.sort();
             let is_consumed_locally = !c_vec.is_empty();
-            if !is_consumed_locally && !p_vec.is_empty() {
+            let is_command_or_query = evt_trimmed.ends_with("Command") || evt_trimmed.ends_with("Query") || evt_trimmed.ends_with("Request");
+
+            if !is_consumed_locally && !p_vec.is_empty() && !is_command_or_query {
                 unconsumed_events.push(evt.clone());
             }
             event_index.insert(
@@ -340,31 +372,38 @@ impl Linker {
             match s.step_type.as_str() {
                 "decision" => {
                     *decisions += 1;
-                    if s.kind.as_deref() == Some("feature_flag") {
+                    if s.kind.as_deref() == Some("feature_flag") || s.kind.as_deref() == Some("config") {
                         if let Some(cond) = &s.condition {
                             let clean = clean_feature_flag(cond);
-                            flag_map.entry(clean).or_default().insert(flow_id.to_string());
+                            if !clean.is_empty() {
+                                flag_map.entry(clean).or_default().insert(flow_id.to_string());
+                            }
                         }
                     }
                 }
                 "effect" => {
                     *effects += 1;
                     if let Some(target) = &s.target {
-                        match s.kind.as_deref() {
-                            Some("db_read") => {
-                                table_map.entry(target.clone()).or_default().0.insert(flow_id.to_string());
+                        let trimmed = target.trim();
+                        if !trimmed.is_empty() && trimmed != "DbContext" && trimmed != "\"\"" {
+                            match s.kind.as_deref() {
+                                Some("db_read") => {
+                                    table_map.entry(trimmed.to_string()).or_default().0.insert(flow_id.to_string());
+                                }
+                                Some("db_write") => {
+                                    table_map.entry(trimmed.to_string()).or_default().1.insert(flow_id.to_string());
+                                }
+                                Some("event_publish") => {
+                                    event_map.entry(trimmed.to_string()).or_default().0.insert(flow_id.to_string());
+                                }
+                                Some("http_call") => {
+                                    let svc = clean_service_name(trimmed);
+                                    if !svc.is_empty() {
+                                        service_map.entry(svc).or_default().insert(flow_id.to_string());
+                                    }
+                                }
+                                _ => {}
                             }
-                            Some("db_write") => {
-                                table_map.entry(target.clone()).or_default().1.insert(flow_id.to_string());
-                            }
-                            Some("event_publish") => {
-                                event_map.entry(target.clone()).or_default().0.insert(flow_id.to_string());
-                            }
-                            Some("http_call") => {
-                                let svc = clean_service_name(target);
-                                service_map.entry(svc).or_default().insert(flow_id.to_string());
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -479,13 +518,19 @@ fn domain_description(domain_id: &str, name: &str) -> String {
 }
 
 fn clean_feature_flag(cond: &str) -> String {
-    let s = cond
+    let mut s = cond
         .replace("RequireFeature(Feature.", "")
         .replace("RequireFeature(", "")
         .replace(')', "")
         .replace('"', "")
+        .replace('!', "")
         .trim()
         .to_string();
+
+    if let Some(pos) = s.rfind('.') {
+        s = s[pos + 1..].trim().to_string();
+    }
+
     if s.is_empty() {
         cond.to_string()
     } else {
@@ -499,5 +544,161 @@ fn clean_service_name(target: &str) -> String {
         parts[parts.len() - 3..].join(".")
     } else {
         target.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_linker_shared_writers_and_audit_cleanliness_g4_g5_g6_g17() {
+        let f1_json = r#"{
+            "id": "POST api/Orders",
+            "kind": "http",
+            "trigger": { "method": "POST", "path": "api/Orders" },
+            "handler": { "symbol": "OrdersController.Submit", "file": "OrdersController.cs", "line": 10 },
+            "coupling": {
+                "reads": ["Orders"],
+                "writes": ["Orders"],
+                "events_published": ["OrderSubmittedDomainEvent", "SubmitOrderCommand", ""],
+                "events_consumed": [],
+                "calls_services": []
+            },
+            "steps": [
+                {
+                    "type": "decision",
+                    "kind": "feature_flag",
+                    "condition": "!order.Program.AutoApproveEnabled"
+                }
+            ],
+            "configs_and_flags": [
+                {
+                    "name": "AutoApproveEnabled",
+                    "kind": "feature_flag",
+                    "source": "config"
+                }
+            ]
+        }"#;
+
+        let f2_json = r#"{
+            "id": "POST api/Orders/{id}/Confirm",
+            "kind": "http",
+            "trigger": { "method": "POST", "path": "api/Orders/{id}/Confirm" },
+            "handler": { "symbol": "OrdersController.Confirm", "file": "OrdersController.cs", "line": 30 },
+            "coupling": {
+                "reads": ["Orders"],
+                "writes": ["Orders"],
+                "events_published": [],
+                "events_consumed": [],
+                "calls_services": []
+            },
+            "steps": []
+        }"#;
+
+        let consumer_json = r#"{
+            "id": "EVENT OrderSubmittedDomainEvent -> ReserveStockHandler",
+            "kind": "event",
+            "trigger": { "topic": "OrderSubmittedDomainEvent", "declared_in": "ReserveStockHandler" },
+            "handler": { "symbol": "ReserveStockHandler.Handle", "file": "ReserveStockHandler.cs", "line": 12 },
+            "coupling": {
+                "reads": ["Inventory"],
+                "writes": ["Inventory"],
+                "events_published": [],
+                "events_consumed": ["OrderSubmittedDomainEvent"],
+                "calls_services": []
+            },
+            "steps": []
+        }"#;
+
+        let flows = vec![
+            serde_json::from_str::<Flow>(f1_json).unwrap(),
+            serde_json::from_str::<Flow>(f2_json).unwrap(),
+            serde_json::from_str::<Flow>(consumer_json).unwrap(),
+        ];
+
+        let map = Linker::build(flows, HashMap::new());
+
+        // G4: Table 'Orders' writers must include BOTH command flows!
+        let orders_entry = map.table_index.get("Orders").expect("Orders table must be indexed");
+        assert!(orders_entry.writers.contains(&"POST api/Orders".to_string()));
+        assert!(orders_entry.writers.contains(&"POST api/Orders/{id}/Confirm".to_string()));
+        // Ensure no literal "DbContext" was indexed as a table
+        assert!(!map.table_index.contains_key("DbContext"));
+
+        // G6: flag_index must track AutoApproveEnabled
+        assert!(map.flag_index.contains_key("AutoApproveEnabled"), "AutoApproveEnabled must be indexed");
+        assert!(map.flag_index["AutoApproveEnabled"].contains(&"POST api/Orders".to_string()));
+
+        // G5 & G17: Audit cleanliness
+        // 1. Empty string "" must NOT be in unconsumed_events
+        assert!(!map.stats.unconsumed_events.contains(&"".to_string()));
+        assert!(!map.event_index.contains_key(""));
+
+        // 2. Point-to-point command "SubmitOrderCommand" must NOT be reported as dead unconsumed event
+        assert!(!map.stats.unconsumed_events.contains(&"SubmitOrderCommand".to_string()));
+
+        // 3. Domain event "OrderSubmittedDomainEvent" has a consumer, so it is NOT unconsumed
+        assert!(!map.stats.unconsumed_events.contains(&"OrderSubmittedDomainEvent".to_string()));
+    }
+
+    #[test]
+    fn test_cross_repo_federation_mesh_g18() {
+        // Repo A (OrderService): publishes OrderSubmittedIntegrationEvent
+        let repo_a_flow = r#"{
+            "id": "POST api/Orders",
+            "kind": "http",
+            "domain": "OrderService",
+            "domain_id": "orders",
+            "trigger": { "method": "POST", "path": "api/Orders" },
+            "handler": { "symbol": "OrdersController.Create", "file": "src/OrdersController.cs", "line": 25 },
+            "coupling": {
+                "reads": ["Orders"],
+                "writes": ["Orders"],
+                "events_published": ["OrderSubmittedIntegrationEvent"],
+                "events_consumed": [],
+                "calls_services": []
+            },
+            "steps": [
+                { "type": "event_publish", "step_id": 1, "kind": "event_publish", "detail": "OrderSubmittedIntegrationEvent", "outcomes": [] }
+            ]
+        }"#;
+
+        // Repo B (WarehouseService): consumes OrderSubmittedIntegrationEvent
+        let repo_b_flow = r#"{
+            "id": "EVENT OrderSubmittedIntegrationEvent -> OrderSubmittedWarehouseHandler",
+            "kind": "event",
+            "domain": "WarehouseService",
+            "domain_id": "warehouse",
+            "trigger": { "topic": "OrderSubmittedIntegrationEvent", "declared_in": "OrderSubmittedWarehouseHandler" },
+            "handler": { "symbol": "OrderSubmittedWarehouseHandler.Handle", "file": "src/Consumers/OrderSubmittedHandler.cs", "line": 15 },
+            "coupling": {
+                "reads": ["Inventory"],
+                "writes": ["Inventory"],
+                "events_published": [],
+                "events_consumed": ["OrderSubmittedIntegrationEvent"],
+                "calls_services": []
+            },
+            "steps": []
+        }"#;
+
+        let flows = vec![
+            serde_json::from_str::<Flow>(repo_a_flow).unwrap(),
+            serde_json::from_str::<Flow>(repo_b_flow).unwrap(),
+        ];
+
+        let federated = Linker::build(flows, HashMap::new());
+
+        // 1. Cross-repo event coupling check
+        let event_coupling = federated.event_index.get("OrderSubmittedIntegrationEvent")
+            .expect("OrderSubmittedIntegrationEvent must exist in federated event_index");
+        assert!(event_coupling.publishers.contains(&"POST api/Orders".to_string()), "Repo A must be registered as publisher");
+        assert!(event_coupling.consumers.contains(&"EVENT OrderSubmittedIntegrationEvent -> OrderSubmittedWarehouseHandler".to_string()), "Repo B must be registered as consumer");
+
+        // 2. Dead event check: since Repo B consumes it, it must NOT be flagged as unconsumed
+        assert!(
+            !federated.stats.unconsumed_events.contains(&"OrderSubmittedIntegrationEvent".to_string()),
+            "Cross-repo event consumed in another repo must NOT be listed as unconsumed"
+        );
     }
 }

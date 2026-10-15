@@ -29,34 +29,113 @@ trees.Add(CSharpSyntaxTree.ParseText(gu != null ? File.ReadAllText(gu) : string.
 var projectAsm = Path.GetFileName(opts.ProjectDir.TrimEnd('\\', '/'));
 
 var refs = new List<MetadataReference>();
-var refDir = opts.RefsDir;
-if (refDir != null && Directory.Exists(refDir))
+var foundDllNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+// 1. Explicit refs directory
+if (opts.RefsDir != null && Directory.Exists(opts.RefsDir))
 {
-    foreach (var dll in Directory.EnumerateFiles(refDir, "*.dll"))
+    foreach (var dll in Directory.EnumerateFiles(opts.RefsDir, "*.dll"))
     {
         if (Path.GetFileNameWithoutExtension(dll).Equals(projectAsm, StringComparison.OrdinalIgnoreCase)) continue;
-        try { _ = AssemblyName.GetAssemblyName(dll); refs.Add(MetadataReference.CreateFromFile(dll)); } catch { /* native dll */ }
+        try
+        {
+            var n = Path.GetFileName(dll);
+            if (foundDllNames.Add(n))
+            {
+                _ = AssemblyName.GetAssemblyName(dll);
+                refs.Add(MetadataReference.CreateFromFile(dll));
+            }
+        }
+        catch { /* native dll */ }
     }
 }
+
+// 2. Auto-discover DLLs in project bin directories (bin/Debug, bin/Release, etc.) - G10
+if (Directory.Exists(opts.ProjectDir))
+{
+    try
+    {
+        foreach (var binDir in Directory.EnumerateDirectories(opts.ProjectDir, "bin", SearchOption.AllDirectories))
+        {
+            foreach (var dll in Directory.EnumerateFiles(binDir, "*.dll", SearchOption.AllDirectories))
+            {
+                var n = Path.GetFileName(dll);
+                if (Path.GetFileNameWithoutExtension(dll).Equals(projectAsm, StringComparison.OrdinalIgnoreCase)) continue;
+                if (foundDllNames.Add(n))
+                {
+                    try { refs.Add(MetadataReference.CreateFromFile(dll)); } catch { }
+                }
+            }
+        }
+    }
+    catch { }
+
+    // 3. Auto-discover NuGet packages via project.assets.json - G10
+    try
+    {
+        var userNuget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+        foreach (var assetsJson in Directory.EnumerateFiles(opts.ProjectDir, "project.assets.json", SearchOption.AllDirectories))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(assetsJson));
+                var packageFolders = new List<string>();
+                if (doc.RootElement.TryGetProperty("packageFolders", out var pf))
+                {
+                    foreach (var prop in pf.EnumerateObject()) packageFolders.Add(prop.Name);
+                }
+                if (packageFolders.Count == 0 && Directory.Exists(userNuget)) packageFolders.Add(userNuget);
+
+                if (doc.RootElement.TryGetProperty("targets", out var targets))
+                {
+                    foreach (var target in targets.EnumerateObject())
+                    {
+                        foreach (var pkg in target.Value.EnumerateObject())
+                        {
+                            if (pkg.Value.TryGetProperty("compile", out var compile))
+                            {
+                                foreach (var dllProp in compile.EnumerateObject())
+                                {
+                                    var relPath = Path.Combine(pkg.Name, dllProp.Name).Replace('/', Path.DirectorySeparatorChar);
+                                    foreach (var baseDir in packageFolders)
+                                    {
+                                        var fullPath = Path.Combine(baseDir, relPath);
+                                        if (File.Exists(fullPath) && foundDllNames.Add(Path.GetFileName(fullPath)))
+                                        {
+                                            try { refs.Add(MetadataReference.CreateFromFile(fullPath)); } catch { }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+    catch { }
+}
+
 var tpa = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?.Split(Path.PathSeparator) ?? [];
 var dotnetRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "..", ".."));
 var aspDir = Path.Combine(dotnetRoot, "Microsoft.AspNetCore.App");
 if (Directory.Exists(aspDir))
 {
-    var best = Directory.GetDirectories(aspDir).OrderByDescending(d => d).FirstOrDefault(d => Path.GetFileName(d).StartsWith("9."));
+    var best = Directory.GetDirectories(aspDir).OrderByDescending(d => d).FirstOrDefault(d => Path.GetFileName(d).StartsWith("9.") || Path.GetFileName(d).StartsWith("8."));
     if (best != null)
         foreach (var dll in Directory.EnumerateFiles(best, "*.dll"))
         {
             var n = Path.GetFileName(dll);
-            if (!refs.Any(r => Path.GetFileName(((PortableExecutableReference)r).FilePath!) == n))
+            if (foundDllNames.Add(n))
                 try { _ = AssemblyName.GetAssemblyName(dll); refs.Add(MetadataReference.CreateFromFile(dll)); } catch { }
         }
 }
 foreach (var p in tpa)
 {
     var n = Path.GetFileName(p);
-    if (!refs.Any(r => Path.GetFileName(((PortableExecutableReference)r).FilePath!) == n))
-        refs.Add(MetadataReference.CreateFromFile(p));
+    if (foundDllNames.Add(n))
+        try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
 }
 
 var compilation = CSharpCompilation.Create("flow", trees, refs,
@@ -68,6 +147,7 @@ var interfaceImplementations = new Dictionary<string, List<string>>(StringCompar
 var classByName = new Dictionary<string, ClassDeclarationSyntax>(StringComparer.OrdinalIgnoreCase);
 var methodsByClassAndName = new Dictionary<string, MethodDeclarationSyntax>(StringComparer.OrdinalIgnoreCase);
 var methodsByName = new Dictionary<string, List<MethodDeclarationSyntax>>(StringComparer.OrdinalIgnoreCase);
+var requestHandlersByCommand = new Dictionary<string, HandlerRegistration>(StringComparer.OrdinalIgnoreCase);
 
 foreach (var t in trees)
 {
@@ -86,8 +166,39 @@ foreach (var t in trees)
                     interfaceImplementations[iface] = new();
                 if (!interfaceImplementations[iface].Contains(cls.Identifier.Text))
                     interfaceImplementations[iface].Add(cls.Identifier.Text);
+
+                // Syntactic detection of IRequestHandler<TCommand, ...> or RequestHandler<TCommand, ...>
+                if (raw.Contains("IRequestHandler<") || raw.Contains("RequestHandler<"))
+                {
+                    var cmdType = raw.Substring(raw.IndexOf('<') + 1).Split(',')[0].Split('>')[0].Trim().Split('.').Last();
+                    var handleM = cls.Members.OfType<MethodDeclarationSyntax>()
+                        .FirstOrDefault(m => m.Identifier.Text is "Handle" or "HandleAsync");
+                    if (handleM != null && !string.IsNullOrWhiteSpace(cmdType))
+                    {
+                        requestHandlersByCommand[cmdType] = new HandlerRegistration(cls, handleM, cmdType);
+                    }
+                }
             }
         }
+
+        // Semantic model detection of IRequestHandler
+        if (sm.GetDeclaredSymbol(cls) is INamedTypeSymbol nts)
+        {
+            foreach (var iface in nts.AllInterfaces)
+            {
+                if (iface.Name is "IRequestHandler" && iface.TypeArguments.Length > 0)
+                {
+                    var cmdType = iface.TypeArguments[0].Name;
+                    var handleM = cls.Members.OfType<MethodDeclarationSyntax>()
+                        .FirstOrDefault(m => m.Identifier.Text is "Handle" or "HandleAsync");
+                    if (handleM != null && !string.IsNullOrWhiteSpace(cmdType))
+                    {
+                        requestHandlersByCommand[cmdType] = new HandlerRegistration(cls, handleM, cmdType);
+                    }
+                }
+            }
+        }
+
         foreach (var m in cls.Members.OfType<MethodDeclarationSyntax>())
         {
             if (sm.GetDeclaredSymbol(m) is IMethodSymbol ms)
@@ -101,27 +212,28 @@ foreach (var t in trees)
     }
 }
 
-var registry = new TypeRegistry(methodIndex, interfaceImplementations, classByName, methodsByClassAndName, methodsByName);
+var registry = new TypeRegistry(methodIndex, interfaceImplementations, classByName, methodsByClassAndName, methodsByName, requestHandlersByCommand);
 
 string[] httpAttrs = ["HttpGet", "HttpPost", "HttpPut", "HttpPatch", "HttpDelete"];
 int count = 0;
 
-// 2. Scan HTTP Controllers
+// 2. Scan HTTP Controllers (G1: Route Token Expansion)
 foreach (var tree in trees)
 {
     var model = compilation.GetSemanticModel(tree);
     foreach (var cls in tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
     {
         if (opts.Only != null && cls.Identifier.Text != opts.Only) continue;
-        var classRoute = cls.AttributeLists.SelectMany(a => a.Attributes).FirstOrDefault(a => AttrName(a) == "Route");
+        var classRoute = cls.AttributeLists.SelectMany(a => a.Attributes).FirstOrDefault(a => RouteHelper.AttrName(a) == "Route");
         var prefix = classRoute?.ArgumentList?.Arguments.FirstOrDefault()?.ToString().Trim('"') ?? "";
         foreach (var m in cls.Members.OfType<MethodDeclarationSyntax>())
         {
-            var http = m.AttributeLists.SelectMany(a => a.Attributes).FirstOrDefault(a => httpAttrs.Contains(AttrName(a)));
+            var http = m.AttributeLists.SelectMany(a => a.Attributes).FirstOrDefault(a => httpAttrs.Contains(RouteHelper.AttrName(a)));
             if (http == null) continue;
-            var verb = AttrName(http)!.Replace("Http", "").ToUpperInvariant();
+            var verb = RouteHelper.AttrName(http)!.Replace("Http", "").ToUpperInvariant();
             var tmpl = http.ArgumentList?.Arguments.FirstOrDefault()?.ToString().Trim('"') ?? "";
-            var path = string.Join('/', new[] { prefix, tmpl }.Where(s => s.Length > 0));
+            var rawCombined = string.Join('/', new[] { prefix, tmpl }.Where(s => s.Length > 0));
+            var path = RouteHelper.ResolveRoute(rawCombined, cls.Identifier.Text, m.Identifier.Text);
             var flow = FlowBuilder.Build(compilation, model, cls, m, verb, path, tree.FilePath, registry);
             var file = Path.Combine(opts.OutDir, $"{cls.Identifier.Text}.{m.Identifier.Text}.json");
             File.WriteAllText(file, JsonSerializer.Serialize(flow, Json.Options));
@@ -130,37 +242,158 @@ foreach (var tree in trees)
     }
 }
 
-// 3. Scan Event Handlers & Message Consumers (IEventHandler<T>, IConsumer<T>, INotificationHandler<T>)
+// 2b. Scan Minimal API Endpoints (G7: Minimal-API endpoint classes & top-level statements)
+string[] mapMethods = ["MapGet", "MapPost", "MapPut", "MapPatch", "MapDelete"];
+foreach (var tree in trees)
+{
+    var model = compilation.GetSemanticModel(tree);
+    var root = tree.GetRoot();
+
+    var invocations = root.DescendantNodes().OfType<InvocationExpressionSyntax>()
+        .Where(inv => inv.Expression is MemberAccessExpressionSyntax ma && mapMethods.Contains(ma.Name.Identifier.Text));
+
+    foreach (var inv in invocations)
+    {
+        var ma = (MemberAccessExpressionSyntax)inv.Expression;
+        var mapMethodName = ma.Name.Identifier.Text;
+        var verb = mapMethodName.Replace("Map", "").ToUpperInvariant();
+
+        var invArgs = inv.ArgumentList.Arguments;
+        if (invArgs.Count == 0) continue;
+
+        var routeArg = invArgs[0].Expression.ToString().Trim('"');
+        var handlerArg = invArgs.Count > 1 ? invArgs[1].Expression : null;
+
+        var enclosingClass = inv.Ancestors().OfType<ClassDeclarationSyntax>().FirstOrDefault();
+        var className = enclosingClass?.Identifier.Text ?? "Program";
+
+        MethodDeclarationSyntax? targetMethod = null;
+        if (handlerArg is IdentifierNameSyntax idSyntax)
+        {
+            targetMethod = enclosingClass?.Members.OfType<MethodDeclarationSyntax>().FirstOrDefault(m => m.Identifier.Text == idSyntax.Identifier.Text);
+        }
+        else if (handlerArg is MemberAccessExpressionSyntax maHandler)
+        {
+            var targetName = maHandler.Name.Identifier.Text;
+            targetMethod = registry.MethodsByName.TryGetValue(targetName, out var mList) ? mList.FirstOrDefault() : null;
+        }
+
+        var flow = FlowBuilder.BuildMinimalApi(compilation, model, enclosingClass, targetMethod, inv, handlerArg, verb, routeArg, tree.FilePath, registry);
+        var safeRoute = routeArg.Replace('/', '_').Replace('{', '_').Replace('}', '_').Replace(':', '_').Trim('_');
+        if (string.IsNullOrEmpty(safeRoute)) safeRoute = "root";
+        var file = Path.Combine(opts.OutDir, $"{className}_{verb}_{safeRoute}.json");
+        File.WriteAllText(file, JsonSerializer.Serialize(flow, Json.Options));
+        count++;
+    }
+}
+
+// 3. Scan Event Handlers & Message Consumers (G8: Consumers derived from generic base classes)
 foreach (var tree in trees)
 {
     var model = compilation.GetSemanticModel(tree);
     foreach (var cls in tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
     {
-        if (cls.BaseList == null) continue;
-        foreach (var baseType in cls.BaseList.Types)
-        {
-            var raw = baseType.Type.ToString();
-            if (raw.Contains("IEventHandler<") || raw.Contains("IConsumer<") || raw.Contains("INotificationHandler<"))
-            {
-                var eventTypeName = raw.Substring(raw.IndexOf('<') + 1).TrimEnd('>').Split('.').Last();
-                var handleMethod = cls.Members.OfType<MethodDeclarationSyntax>()
-                    .FirstOrDefault(m => m.Identifier.Text is "HandleAsync" or "Handle" or "Consume");
-                if (handleMethod == null) continue;
+        var discoveredEvents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                var flow = FlowBuilder.BuildEventHandler(compilation, model, cls, handleMethod, eventTypeName, tree.FilePath, registry);
-                var file = Path.Combine(opts.OutDir, $"{cls.Identifier.Text}.{handleMethod.Identifier.Text}.json");
-                File.WriteAllText(file, JsonSerializer.Serialize(flow, Json.Options));
-                count++;
+        // Check semantic model interfaces (AllInterfaces checks entire hierarchy)
+        if (model.GetDeclaredSymbol(cls) is INamedTypeSymbol nts)
+        {
+            foreach (var iface in nts.AllInterfaces)
+            {
+                if (iface.Name is "IConsumer" or "IEventHandler" or "INotificationHandler" or "IIntegrationEventHandler")
+                {
+                    if (iface.TypeArguments.Length > 0)
+                    {
+                        var evName = iface.TypeArguments[0].Name;
+                        if (!string.IsNullOrWhiteSpace(evName))
+                            discoveredEvents.Add(evName);
+                    }
+                }
             }
+        }
+
+        // Syntactic fallback for base classes (e.g. IntegrationEventHandler<T>)
+        if (cls.BaseList != null)
+        {
+            foreach (var bt in cls.BaseList.Types)
+            {
+                var raw = bt.Type.ToString();
+                if (raw.Contains('<') && raw.Contains('>'))
+                {
+                    var baseName = raw.Split('<')[0].Split('.').Last();
+                    var argName = raw.Substring(raw.IndexOf('<') + 1).Split('>')[0].Split(',')[0].Trim().Split('.').Last();
+                    if (baseName.Contains("EventHandler") || baseName.Contains("Consumer") || baseName.Contains("NotificationHandler"))
+                    {
+                        if (!string.IsNullOrWhiteSpace(argName))
+                            discoveredEvents.Add(argName);
+                    }
+                    else if (classByName.TryGetValue(baseName, out var baseCls) && baseCls.BaseList != null)
+                    {
+                        if (baseCls.BaseList.Types.Any(t => t.ToString().Contains("IConsumer") || t.ToString().Contains("IEventHandler") || t.ToString().Contains("INotificationHandler")))
+                        {
+                            if (!string.IsNullOrWhiteSpace(argName))
+                                discoveredEvents.Add(argName);
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (var eventTypeName in discoveredEvents)
+        {
+            if (string.IsNullOrWhiteSpace(eventTypeName)) continue;
+            var handleMethod = cls.Members.OfType<MethodDeclarationSyntax>()
+                .FirstOrDefault(m => m.Identifier.Text is "HandleAsync" or "Handle" or "Consume");
+
+            if (handleMethod == null && cls.BaseList?.Types.Count > 0)
+            {
+                var baseName = cls.BaseList.Types[0].Type.ToString().Split('<')[0].Split('.').Last();
+                if (classByName.TryGetValue(baseName, out var baseCls))
+                {
+                    handleMethod = baseCls.Members.OfType<MethodDeclarationSyntax>()
+                        .FirstOrDefault(m => m.Identifier.Text is "HandleAsync" or "Handle" or "Consume");
+                }
+            }
+
+            if (handleMethod == null) continue;
+
+            var flow = FlowBuilder.BuildEventHandler(compilation, model, cls, handleMethod, eventTypeName, tree.FilePath, registry);
+            var file = Path.Combine(opts.OutDir, $"{cls.Identifier.Text}.{handleMethod.Identifier.Text}_{eventTypeName}.json");
+            File.WriteAllText(file, JsonSerializer.Serialize(flow, Json.Options));
+            count++;
         }
     }
 }
 
 Console.WriteLine($"Wrote {count} flows to {opts.OutDir}");
 var errs = compilation.GetDiagnostics().Count(d => d.Severity == DiagnosticSeverity.Error);
-Console.WriteLine($"(compilation diagnostics: {errs} errors; unresolved symbols lower confidence)");
+Console.WriteLine($"(compilation diagnostics: {errs} errors; reference assemblies resolved: {refs.Count})");
 
-static string? AttrName(AttributeSyntax a) => a.Name.ToString().Split('.').Last().Replace("Attribute", "");
+public static class RouteHelper
+{
+    public static string? AttrName(AttributeSyntax a) => a.Name.ToString().Split('.').Last().Replace("Attribute", "");
+
+    public static string ResolveRoute(string template, string controllerClass, string actionMethod)
+    {
+        var ctrlName = controllerClass.EndsWith("Controller", StringComparison.OrdinalIgnoreCase) && controllerClass.Length > 10
+            ? controllerClass.Substring(0, controllerClass.Length - "Controller".Length)
+            : controllerClass;
+        var actName = actionMethod.EndsWith("Async", StringComparison.OrdinalIgnoreCase) && actionMethod.Length > 5
+            ? actionMethod.Substring(0, actionMethod.Length - "Async".Length)
+            : actionMethod;
+
+        var resolved = template
+            .Replace("[controller]", ctrlName, StringComparison.OrdinalIgnoreCase)
+            .Replace("{controller}", ctrlName, StringComparison.OrdinalIgnoreCase)
+            .Replace("[action]", actName, StringComparison.OrdinalIgnoreCase)
+            .Replace("{action}", actName, StringComparison.OrdinalIgnoreCase);
+
+        var parts = resolved.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return string.Join('/', parts);
+    }
+}
+
+record HandlerRegistration(ClassDeclarationSyntax Class, MethodDeclarationSyntax Method, string CommandType);
 
 record Cli(string ProjectDir, string OutDir, string? RefsDir, string? Only)
 {
@@ -191,12 +424,13 @@ record TypeRegistry(
     Dictionary<string, List<string>> InterfaceImplementations,
     Dictionary<string, ClassDeclarationSyntax> ClassByName,
     Dictionary<string, MethodDeclarationSyntax> MethodsByClassAndName,
-    Dictionary<string, List<MethodDeclarationSyntax>> MethodsByName
+    Dictionary<string, List<MethodDeclarationSyntax>> MethodsByName,
+    Dictionary<string, HandlerRegistration> RequestHandlersByCommand
 );
 
 static class FlowBuilder
 {
-    const int MaxDepth = 5;
+    const int MaxDepth = 6;
 
     public static Dictionary<string, object?> Build(
         Compilation comp, SemanticModel model, ClassDeclarationSyntax cls, MethodDeclarationSyntax m,
@@ -213,7 +447,7 @@ static class FlowBuilder
         }
 
         var visited = new HashSet<MethodDeclarationSyntax>();
-        var ctx = new Ctx(comp, registry, visited);
+        var ctx = new Ctx(comp, registry, visited, cls.Identifier.Text);
         var steps = m.Body != null ? ctx.WalkBlock(m.Body, model, 0)
                   : m.ExpressionBody != null ? ctx.ExprSteps(m.ExpressionBody.Expression, model, 0)
                   : new List<object>();
@@ -283,15 +517,21 @@ static class FlowBuilder
         {
             foreach (var r in readsEl.EnumerateArray())
             {
-                tablesTouched.Add(new { table = r.GetString() ?? "", operation = "SELECT", transactional = false });
+                var tbl = r.GetString();
+                if (!string.IsNullOrWhiteSpace(tbl) && tbl != "DbContext")
+                    tablesTouched.Add(new { table = tbl, operation = "SELECT", transactional = false });
             }
         }
         if (couplingDict.TryGetValue("writes", out var writesEl) && writesEl.ValueKind == JsonValueKind.Array)
         {
             foreach (var w in writesEl.EnumerateArray())
             {
-                var op = verb == "POST" ? "INSERT" : verb == "DELETE" ? "DELETE" : "UPDATE";
-                tablesTouched.Add(new { table = w.GetString() ?? "", operation = op, transactional = true });
+                var tbl = w.GetString();
+                if (!string.IsNullOrWhiteSpace(tbl) && tbl != "DbContext")
+                {
+                    var op = verb == "POST" ? "INSERT" : verb == "DELETE" ? "DELETE" : "UPDATE";
+                    tablesTouched.Add(new { table = tbl, operation = op, transactional = true });
+                }
             }
         }
 
@@ -326,6 +566,89 @@ static class FlowBuilder
             ["steps"] = steps,
             ["coupling"] = couplingObj,
             ["tables_touched"] = tablesTouched,
+            ["configs_and_flags"] = ctx.TrackedFlags.ToList(),
+        };
+    }
+
+    public static Dictionary<string, object?> BuildMinimalApi(
+        Compilation comp, SemanticModel model, ClassDeclarationSyntax? cls, MethodDeclarationSyntax? m,
+        InvocationExpressionSyntax inv, ExpressionSyntax? handlerArg,
+        string verb, string rawPath, string file, TypeRegistry registry)
+    {
+        var className = cls?.Identifier.Text ?? "Program";
+        var methodName = m?.Identifier.Text ?? $"{verb}_{rawPath.Replace('/', '_').Replace('{', '_').Replace('}', '_')}";
+        var path = RouteHelper.ResolveRoute(rawPath, className, methodName);
+
+        var guards = new List<object>();
+        var visited = new HashSet<MethodDeclarationSyntax>();
+        var ctx = new Ctx(comp, registry, visited, className);
+        var steps = new List<object>();
+
+        if (handlerArg is LambdaExpressionSyntax lambda)
+        {
+            if (lambda.Body is BlockSyntax b)
+                steps.AddRange(ctx.WalkBlock(b, model, 0));
+            else if (lambda.Body is ExpressionSyntax expr)
+                steps.AddRange(ctx.ExprSteps(expr, model, 0));
+        }
+        else if (m != null)
+        {
+            if (m.Body != null)
+                steps.AddRange(ctx.WalkBlock(m.Body, model, 0));
+            else if (m.ExpressionBody != null)
+                steps.AddRange(ctx.ExprSteps(m.ExpressionBody.Expression, model, 0));
+        }
+
+        var domainId = className.ToLower().Replace("endpoint", "").Replace("module", "").Replace("controller", "");
+        if (string.IsNullOrEmpty(domainId)) domainId = "api";
+        var domainName = $"{className} Operations";
+
+        var couplingObj = Coupling(steps);
+        var tablesTouched = new List<object>();
+        var couplingDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(couplingObj)) ?? new();
+        if (couplingDict.TryGetValue("reads", out var readsEl) && readsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var r in readsEl.EnumerateArray())
+            {
+                var tbl = r.GetString();
+                if (!string.IsNullOrWhiteSpace(tbl) && tbl != "DbContext")
+                    tablesTouched.Add(new { table = tbl, operation = "SELECT", transactional = false });
+            }
+        }
+        if (couplingDict.TryGetValue("writes", out var writesEl) && writesEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var w in writesEl.EnumerateArray())
+            {
+                var tbl = w.GetString();
+                if (!string.IsNullOrWhiteSpace(tbl) && tbl != "DbContext")
+                    tablesTouched.Add(new { table = tbl, operation = verb == "POST" ? "INSERT" : "UPDATE", transactional = true });
+            }
+        }
+
+        return new()
+        {
+            ["id"] = $"{verb} {path}",
+            ["kind"] = "http",
+            ["domain"] = domainName,
+            ["domain_id"] = domainId,
+            ["scenario"] = $"{verb} {path}",
+            ["trigger"] = new { method = verb, path, declared_in = $"{className}.{methodName}" },
+            ["handler"] = new
+            {
+                symbol = $"{className}.{methodName}",
+                file,
+                line = Line(inv),
+                signature = $"{methodName}()",
+            },
+            ["contract"] = new
+            {
+                response = new { status_codes = new[] { new { code = verb == "POST" ? 201 : 200, description = "Success" } } },
+            },
+            ["guards"] = guards,
+            ["steps"] = steps,
+            ["coupling"] = couplingObj,
+            ["tables_touched"] = tablesTouched,
+            ["configs_and_flags"] = ctx.TrackedFlags.ToList(),
         };
     }
 
@@ -334,7 +657,7 @@ static class FlowBuilder
         string eventTypeName, string file, TypeRegistry registry)
     {
         var visited = new HashSet<MethodDeclarationSyntax>();
-        var ctx = new Ctx(comp, registry, visited);
+        var ctx = new Ctx(comp, registry, visited, cls.Identifier.Text);
         var steps = m.Body != null ? ctx.WalkBlock(m.Body, model, 0)
                   : m.ExpressionBody != null ? ctx.ExprSteps(m.ExpressionBody.Expression, model, 0)
                   : new List<object>();
@@ -367,12 +690,20 @@ static class FlowBuilder
         if (couplingDict.TryGetValue("reads", out var readsEl) && readsEl.ValueKind == JsonValueKind.Array)
         {
             foreach (var r in readsEl.EnumerateArray())
-                tablesTouched.Add(new { table = r.GetString() ?? "", operation = "SELECT", transactional = false });
+            {
+                var tbl = r.GetString();
+                if (!string.IsNullOrWhiteSpace(tbl) && tbl != "DbContext")
+                    tablesTouched.Add(new { table = tbl, operation = "SELECT", transactional = false });
+            }
         }
         if (couplingDict.TryGetValue("writes", out var writesEl) && writesEl.ValueKind == JsonValueKind.Array)
         {
             foreach (var w in writesEl.EnumerateArray())
-                tablesTouched.Add(new { table = w.GetString() ?? "", operation = "UPDATE", transactional = true });
+            {
+                var tbl = w.GetString();
+                if (!string.IsNullOrWhiteSpace(tbl) && tbl != "DbContext")
+                    tablesTouched.Add(new { table = tbl, operation = "UPDATE", transactional = true });
+            }
         }
 
         return new()
@@ -401,6 +732,7 @@ static class FlowBuilder
             ["steps"] = steps,
             ["coupling"] = couplingObj,
             ["tables_touched"] = tablesTouched,
+            ["configs_and_flags"] = ctx.TrackedFlags.ToList(),
         };
     }
 
@@ -421,9 +753,13 @@ static class FlowBuilder
             }
         }
         Collect(steps);
+
         List<string> Targets(string kind, string? op = null) => all
             .Where(d => d.GetValueOrDefault("kind") as string == kind && (op == null || (d.GetValueOrDefault("op") as string)?.StartsWith(op) == true))
-            .Select(d => d.GetValueOrDefault("target") as string ?? "?").Distinct().OrderBy(x => x).ToList();
+            .Select(d => d.GetValueOrDefault("target") as string ?? "")
+            .Where(s => !string.IsNullOrWhiteSpace(s) && s != "DbContext" && s != "\"\"")
+            .Distinct().OrderBy(x => x).ToList();
+
         return new
         {
             reads = Targets("db_read"),
@@ -443,8 +779,11 @@ static class FlowBuilder
         return d;
     }
 
-    sealed class Ctx(Compilation comp, TypeRegistry registry, HashSet<MethodDeclarationSyntax> visited)
+    sealed class Ctx(Compilation comp, TypeRegistry registry, HashSet<MethodDeclarationSyntax> visited, string contextName = "")
     {
+        public HashSet<string> TrackedTables { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> TrackedFlags { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         public List<object> WalkBlock(BlockSyntax? block, SemanticModel model, int depth)
         {
             var steps = new List<object>();
@@ -463,6 +802,7 @@ static class FlowBuilder
 
                 case IfStatementSyntax ifs:
                 {
+                    var (condKind, flagName) = ClassifyCondition(ifs.Condition, model);
                     steps.AddRange(ExprSteps(ifs.Condition, model, depth));
                     var branches = new List<object>
                     {
@@ -470,12 +810,21 @@ static class FlowBuilder
                     };
                     if (ifs.Else != null)
                         branches.Add(new Dictionary<string, object?> { ["when"] = "false", ["steps"] = WalkStatement(ifs.Else.Statement, model, depth) });
-                    steps.Add(Step("decision",
-                        ("kind", ClassifyCondition(ifs.Condition, model)),
+
+                    var step = Step("decision",
+                        ("kind", condKind),
                         ("condition", Short(ifs.Condition)),
                         ("line", Line(ifs)),
                         ("branches", branches),
-                        ("confidence", "extracted")));
+                        ("confidence", "extracted"));
+
+                    if (flagName != null)
+                    {
+                        step["flag"] = flagName;
+                        TrackedFlags.Add(flagName);
+                    }
+
+                    steps.Add(step);
                     return steps;
                 }
 
@@ -494,9 +843,11 @@ static class FlowBuilder
                     steps.AddRange(ExprSteps(fe.Expression, model, depth));
                     steps.Add(Step("loop", ("over", Short(fe.Expression)), ("line", Line(fe)), ("steps", WalkStatement(fe.Statement, model, depth))));
                     return steps;
+
                 case ForStatementSyntax fo:
                     steps.Add(Step("loop", ("over", fo.Condition?.ToString()), ("line", Line(fo)), ("steps", WalkStatement(fo.Statement, model, depth))));
                     return steps;
+
                 case WhileStatementSyntax wh:
                     steps.Add(Step("loop", ("over", Short(wh.Condition)), ("line", Line(wh)), ("steps", WalkStatement(wh.Statement, model, depth))));
                     return steps;
@@ -522,14 +873,33 @@ static class FlowBuilder
                         if (v.Initializer != null)
                         {
                             steps.AddRange(ExprSteps(v.Initializer.Value, model, depth));
-                            if (v.Initializer.Value.ToString().Contains("Config") && v.Initializer.Value.ToString().Contains("??"))
-                                steps.Add(Step("decision", ("kind", "config"), ("condition", Short(v.Initializer.Value)), ("assigns", v.Identifier.Text), ("line", Line(v)), ("confidence", "extracted")));
+                            var initStr = v.Initializer.Value.ToString();
+                            if (initStr.Contains("Config") || initStr.Contains("Enabled") || initStr.Contains("Feature"))
+                            {
+                                var (_, fName) = ClassifyCondition(v.Initializer.Value, model);
+                                if (fName != null) TrackedFlags.Add(fName);
+                            }
                         }
                     return steps;
 
                 case ExpressionStatementSyntax es:
-                    if (es.Expression is AssignmentExpressionSyntax asg && asg.Left is MemberAccessExpressionSyntax)
-                        steps.Add(Step("effect", ("kind", "state_mutation"), ("target", Short(asg.Left)), ("op", $"= {Short(asg.Right)}"), ("line", Line(es)), ("confidence", "extracted")));
+                    if (es.Expression is AssignmentExpressionSyntax asg && asg.Left is MemberAccessExpressionSyntax maAsg)
+                    {
+                        var targetName = Short(asg.Left) ?? "";
+                        steps.Add(Step("effect", ("kind", "state_mutation"), ("target", targetName), ("op", $"= {Short(asg.Right)}"), ("line", Line(es)), ("confidence", "extracted")));
+
+                        // Track entity table write (G4)
+                        var entityVar = maAsg.Expression.ToString();
+                        var entityType = model.GetTypeInfo(maAsg.Expression).Type?.Name;
+                        if (entityType != null && entityType != "Object")
+                        {
+                            TrackedTables.Add(Pluralize(entityType));
+                        }
+                        else
+                        {
+                            TrackedTables.Add(Pluralize(entityVar));
+                        }
+                    }
                     steps.AddRange(ExprSteps(es.Expression, model, depth));
                     return steps;
             }
@@ -561,19 +931,35 @@ static class FlowBuilder
             var chainRoot = ChainRoot(inv);
             var sym = model.GetSymbolInfo(inv).Symbol as IMethodSymbol;
 
-            // DbContext.SaveChanges*
+            // 1. EF Core: SaveChanges / SaveChangesAsync (G4: Handler Table Writes)
             if (name.StartsWith("SaveChanges"))
-                return [Step("effect", ("kind", "db_write"), ("target", "DbContext"), ("op", name), ("transactional", true), ("line", line), ("confidence", "resolved"))];
+            {
+                var tablesToRecord = TrackedTables.Where(t => t != "DbContext" && !string.IsNullOrWhiteSpace(t)).ToList();
+                if (tablesToRecord.Count == 0)
+                {
+                    // Infer table from enclosing class/domain context
+                    var inferred = InferTableFromContext(inv, model, contextName);
+                    tablesToRecord.Add(inferred);
+                }
 
-            // Direct DbSet mutation or query: _dbContext.Quotes.Add / FirstOrDefaultAsync / etc.
+                var writeSteps = new List<object>();
+                foreach (var tbl in tablesToRecord)
+                {
+                    writeSteps.Add(Step("effect", ("kind", "db_write"), ("target", tbl), ("op", name), ("transactional", true), ("line", line), ("confidence", "resolved")));
+                }
+                return writeSteps;
+            }
+
+            // 2. Direct DbSet mutation or query: _dbContext.Orders.Add / FirstOrDefaultAsync / etc.
             var dbSet = DbSetOf(chainRoot, model);
             if (dbSet != null)
             {
+                TrackedTables.Add(dbSet);
                 var write = name is "Add" or "AddAsync" or "AddRange" or "Remove" or "RemoveRange" or "Update" or "ExecuteUpdateAsync" or "ExecuteDeleteAsync";
                 return [Step("effect", ("kind", write ? "db_write" : "db_read"), ("target", dbSet), ("op", name), ("line", line), ("confidence", "resolved"))];
             }
 
-            // dbContext.Add(entity) or dbContext.Update(entity) where target is on DbContext itself
+            // 3. dbContext.Add(entity) or dbContext.Update(entity)
             if (chainRoot.ToString().ToLower().Contains("dbcontext") && (name is "Add" or "AddAsync" or "AddRange" or "Remove" or "RemoveRange" or "Update"))
             {
                 var arg = inv.ArgumentList.Arguments.FirstOrDefault()?.Expression;
@@ -596,22 +982,101 @@ static class FlowBuilder
                 }
                 if (targetTable != null)
                 {
-                    var tablePlural = targetTable.EndsWith("s") ? targetTable : $"{targetTable}s";
+                    var tablePlural = Pluralize(targetTable);
+                    TrackedTables.Add(tablePlural);
                     return [Step("effect", ("kind", "db_write"), ("target", tablePlural), ("op", name), ("line", line), ("confidence", "resolved"))];
                 }
             }
 
-            // Domain Event: AddDomainEvent(new SomeEvent(...))
+            // 4. Domain Event: AddDomainEvent(new SomeEvent(...)) - G3
             if (name == "AddDomainEvent")
             {
                 var ev = inv.ArgumentList.Arguments.FirstOrDefault()?.Expression;
                 var evType = ev is ObjectCreationExpressionSyntax oc ? oc.Type.ToString().Split('.').Last() : Short(ev)?.Split('.').Last();
                 if (evType != null && evType.Contains("(")) evType = evType.Split('(')[0].Trim();
-                return [Step("effect", ("kind", "event_publish"), ("target", evType ?? "DomainEvent"), ("op", "AddDomainEvent"), ("deferred_until", "SaveChanges"), ("line", line), ("confidence", "extracted"))];
+                if (!string.IsNullOrWhiteSpace(evType) && evType != "DomainEvent")
+                {
+                    return [Step("effect", ("kind", "event_publish"), ("target", evType), ("op", "AddDomainEvent"), ("deferred_until", "SaveChanges"), ("line", line), ("confidence", "extracted"))];
+                }
+                return [];
             }
 
-            // Event Bus / Messaging: Publish / PublishAsync / Send
-            if (name is "Publish" or "PublishAsync" or "Send" or "SendAsync")
+            // 5. Mediator / Sender: mediator.Send(...) - G2 & G17
+            var recvExpr = inv.Expression is MemberAccessExpressionSyntax maRecv ? maRecv.Expression.ToString() : "";
+            var isMediatorSend = (name is "Send" or "SendAsync") &&
+                (recvExpr.Contains("mediator", StringComparison.OrdinalIgnoreCase) ||
+                 recvExpr.Contains("sender", StringComparison.OrdinalIgnoreCase) ||
+                 recvExpr.StartsWith("_sender") || recvExpr.StartsWith("_mediator"));
+
+            if (isMediatorSend)
+            {
+                string? commandTypeName = null;
+                var arg = inv.ArgumentList.Arguments.FirstOrDefault()?.Expression;
+                if (arg is ObjectCreationExpressionSyntax oc)
+                    commandTypeName = oc.Type.ToString().Split('.').Last().Split('<')[0];
+                else if (arg != null)
+                {
+                    var t = model.GetTypeInfo(arg).Type?.Name;
+                    if (t != null && t != "Object") commandTypeName = t;
+                    else
+                    {
+                        var argText = arg.ToString();
+                        var localDecl = inv.Ancestors().OfType<BlockSyntax>().SelectMany(b => b.Statements.OfType<LocalDeclarationStatementSyntax>())
+                            .SelectMany(ld => ld.Declaration.Variables)
+                            .FirstOrDefault(v => v.Identifier.Text == argText);
+                        if (localDecl?.Initializer?.Value is ObjectCreationExpressionSyntax oc2)
+                            commandTypeName = oc2.Type.ToString().Split('.').Last().Split('<')[0];
+                    }
+                }
+
+                if (inv.Expression is MemberAccessExpressionSyntax maGen && maGen.Name is GenericNameSyntax gn)
+                {
+                    commandTypeName ??= gn.TypeArgumentList.Arguments.FirstOrDefault()?.ToString().Split('.').Last();
+                }
+
+                if (commandTypeName != null && registry.RequestHandlersByCommand.TryGetValue(commandTypeName, out var handlerReg))
+                {
+                    var callNode = Step("call",
+                        ("symbol", $"{handlerReg.Class.Identifier.Text}.{handlerReg.Method.Identifier.Text}"),
+                        ("target", commandTypeName),
+                        ("kind", "mediator_send"),
+                        ("file", handlerReg.Method.SyntaxTree.FilePath),
+                        ("line", Line(handlerReg.Method)),
+                        ("call_line", line),
+                        ("resolved_via", "mediator"),
+                        ("confidence", "resolved"));
+
+                    if (depth < MaxDepth && visited.Add(handlerReg.Method))
+                    {
+                        var childModel = comp.GetSemanticModel(handlerReg.Method.SyntaxTree);
+                        var subCtx = new Ctx(comp, registry, visited, handlerReg.Class.Identifier.Text);
+                        var subSteps = handlerReg.Method.Body != null
+                            ? subCtx.WalkBlock(handlerReg.Method.Body, childModel, depth + 1)
+                            : handlerReg.Method.ExpressionBody != null
+                            ? subCtx.ExprSteps(handlerReg.Method.ExpressionBody.Expression, childModel, depth + 1)
+                            : new List<object>();
+
+                        callNode["steps"] = subSteps;
+                        visited.Remove(handlerReg.Method);
+
+                        // Bubble up tables and flags discovered in the mediator handler!
+                        foreach (var t in subCtx.TrackedTables) TrackedTables.Add(t);
+                        foreach (var f in subCtx.TrackedFlags) TrackedFlags.Add(f);
+                    }
+                    else
+                    {
+                        callNode["note"] = "not expanded (depth/cycle)";
+                    }
+                    return [callNode];
+                }
+                else if (commandTypeName != null)
+                {
+                    return [Step("call", ("symbol", $"IRequestHandler<{commandTypeName}>.Handle"), ("target", commandTypeName), ("kind", "mediator_send"), ("line", line), ("confidence", "unresolved"))];
+                }
+            }
+
+            // 6. Pub/Sub Messaging: bus.Publish / PublishAsync / mediator.Publish (G5: Filter empty names)
+            if (name is "Publish" or "PublishAsync")
             {
                 string? evType = null;
                 if (inv.Expression is MemberAccessExpressionSyntax ma && ma.Name is GenericNameSyntax gn)
@@ -626,10 +1091,11 @@ static class FlowBuilder
                         if (tInfo != null && tInfo != "Object") evType = tInfo;
                     }
                 }
-                if (evType != null)
+                if (!string.IsNullOrWhiteSpace(evType) && evType != "Object" && evType != "\"\"")
                 {
                     return [Step("effect", ("kind", "event_publish"), ("target", evType), ("op", name), ("line", line), ("confidence", "resolved"))];
                 }
+                return [];
             }
 
             var recvType = ReceiverType(inv, model);
@@ -639,7 +1105,7 @@ static class FlowBuilder
             if (recvName != null && (recvName.EndsWith("ApiClient") || recvName.EndsWith("HttpClient")))
                 return [Step("effect", ("kind", "http_call"), ("target", $"{recvName}.{name}"), ("line", line), ("confidence", "resolved"))];
 
-            // 4. Resolve In-Source Methods, Interface Implementations, and Domain Model Methods
+            // 7. Resolve In-Source Methods, Interface Implementations, and Domain Model Methods
             MethodDeclarationSyntax? targetDecl = null;
             string? targetClassName = null;
 
@@ -666,7 +1132,7 @@ static class FlowBuilder
                 }
             }
 
-            // Step B: Syntactic resolution fallback (vital for DI interfaces or domain entities like station.RecordReading)
+            // Step B: Syntactic resolution fallback (vital for DI interfaces or domain entities like order.Submit)
             if (targetDecl == null && inv.Expression is MemberAccessExpressionSyntax maCall)
             {
                 var recvText = maCall.Expression.ToString();
@@ -723,6 +1189,8 @@ static class FlowBuilder
 
                 if (recvTypeName != null)
                 {
+                    TrackedTables.Add(Pluralize(recvTypeName));
+
                     if (registry.InterfaceImplementations.TryGetValue(recvTypeName, out var impls) && impls.Count > 0)
                         recvTypeName = impls[0];
                     else if (recvTypeName.StartsWith("I") && registry.ClassByName.ContainsKey(recvTypeName[1..]))
@@ -767,14 +1235,18 @@ static class FlowBuilder
                 if (depth < MaxDepth && visited.Add(targetDecl))
                 {
                     var childModel = comp.GetSemanticModel(targetDecl.SyntaxTree);
-                    var subSteps = new List<object>();
-                    if (targetDecl.Body != null)
-                        subSteps.AddRange(WalkBlock(targetDecl.Body, childModel, depth + 1));
-                    else if (targetDecl.ExpressionBody != null)
-                        subSteps.AddRange(ExprSteps(targetDecl.ExpressionBody.Expression, childModel, depth + 1));
+                    var subCtx = new Ctx(comp, registry, visited, targetClassName ?? contextName);
+                    var subSteps = targetDecl.Body != null
+                        ? subCtx.WalkBlock(targetDecl.Body, childModel, depth + 1)
+                        : targetDecl.ExpressionBody != null
+                        ? subCtx.ExprSteps(targetDecl.ExpressionBody.Expression, childModel, depth + 1)
+                        : new List<object>();
 
                     callNode["steps"] = subSteps;
                     visited.Remove(targetDecl);
+
+                    foreach (var t in subCtx.TrackedTables) TrackedTables.Add(t);
+                    foreach (var f in subCtx.TrackedFlags) TrackedFlags.Add(f);
                 }
                 else
                 {
@@ -798,7 +1270,6 @@ static class FlowBuilder
                 else if (cur is ParenthesizedExpressionSyntax p) cur = p.Expression;
                 else return cur;
                 if (cur is IdentifierNameSyntax or ThisExpressionSyntax) return cur;
-                if (cur is MemberAccessExpressionSyntax m2 && m2.Expression is IdentifierNameSyntax or ThisExpressionSyntax) { }
             }
         }
 
@@ -831,16 +1302,25 @@ static class FlowBuilder
             return null;
         }
 
-        static string ClassifyCondition(ExpressionSyntax cond, SemanticModel model)
+        (string Kind, string? FlagName) ClassifyCondition(ExpressionSyntax cond, SemanticModel model)
         {
             var t = cond.ToString();
             var noCurrent = t.Replace("CurrentVersion", "");
-            if (t.Contains("Forbid") || t.Contains("UserId") || t.Contains("TenantId") || t.Contains("StationId") && t.Contains("!=")) return "authz";
-            if (t.Contains("Status")) return "state_check";
-            if (System.Text.RegularExpressions.Regex.IsMatch(noCurrent, @"[Vv]ersion")) return "version_check";
-            if (t.Contains("IsSuccess") || t.Contains("IsValid")) return "validation";
-            if (t.Contains("Config") || t.Contains("Enabled")) return "config";
-            return "state_check";
+            if (t.Contains("Forbid") || t.Contains("UserId") || t.Contains("TenantId") || (t.Contains("StationId") && t.Contains("!=")))
+                return ("authz", null);
+            if (t.Contains("Status")) return ("state_check", null);
+            if (System.Text.RegularExpressions.Regex.IsMatch(noCurrent, @"[Vv]ersion")) return ("version_check", null);
+            if (t.Contains("IsSuccess") || t.Contains("IsValid")) return ("validation", null);
+
+            // G6: Configuration-driven branching & flags
+            if (t.Contains("Config") || t.Contains("Enabled") || t.Contains("Feature") || t.Contains("Setting") || t.Contains("Flag") || t.Contains("Option") || t.Contains("Allow"))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(t, @"(?:\b|[._])([A-Za-z0-9_]*(?:Enabled|Feature|Config|Setting|Flag|Option|Allow)[A-Za-z0-9_]*)");
+                var flagName = match.Success ? match.Groups[1].Value : t.Replace("!", "").Trim();
+                TrackedFlags.Add(flagName);
+                return ("feature_flag", flagName);
+            }
+            return ("state_check", null);
         }
 
         static string ReturnStatus(ExpressionSyntax? e, SemanticModel model)
@@ -864,6 +1344,31 @@ static class FlowBuilder
             if (n == null) return null;
             var s = string.Join(" ", n.ToString().Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()));
             return s.Length > 160 ? s[..157] + "..." : s;
+        }
+
+        static string Pluralize(string name)
+        {
+            var clean = name.TrimStart('_');
+            if (clean.EndsWith("s", StringComparison.OrdinalIgnoreCase)) return clean;
+            if (clean.EndsWith("y", StringComparison.OrdinalIgnoreCase) && clean.Length > 1 && !"aeiou".Contains(char.ToLowerInvariant(clean[^2])))
+                return clean[..^1] + "ies";
+            return clean + "s";
+        }
+
+        static string InferTableFromContext(InvocationExpressionSyntax inv, SemanticModel model, string fallback)
+        {
+            var m = inv.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+            if (m != null)
+            {
+                foreach (var p in m.ParameterList.Parameters)
+                {
+                    var pType = p.Type?.ToString()?.Split('.').Last();
+                    if (pType != null && !pType.StartsWith("int") && !pType.StartsWith("string") && !pType.StartsWith("Guid") && !pType.StartsWith("CancellationToken"))
+                        return Pluralize(pType);
+                }
+            }
+            var clean = fallback.Replace("Controller", "").Replace("CommandHandler", "").Replace("Handler", "");
+            return !string.IsNullOrWhiteSpace(clean) ? Pluralize(clean) : "Records";
         }
     }
 }

@@ -20,8 +20,16 @@ pub struct FlowDiffReport {
 pub struct FlowDelta {
     pub guards_added: Vec<String>,
     pub guards_removed: Vec<String>,
-    pub effects_added: Vec<String>,
-    pub effects_removed: Vec<String>,
+    pub reads_added: Vec<String>,
+    pub reads_removed: Vec<String>,
+    pub writes_added: Vec<String>,
+    pub writes_removed: Vec<String>,
+    pub events_added: Vec<String>,
+    pub events_removed: Vec<String>,
+    pub calls_added: Vec<String>,
+    pub calls_removed: Vec<String>,
+    pub flags_added: Vec<String>,
+    pub flags_removed: Vec<String>,
     pub outcomes_added: Vec<String>,
     pub outcomes_removed: Vec<String>,
     pub is_breaking: bool,
@@ -232,21 +240,42 @@ impl FlowDiffer {
     fn diff_flow(base: &Flow, curr: &Flow) -> FlowDelta {
         let base_guards: HashSet<_> = base.guards.iter().filter_map(|g| g.condition.clone()).collect();
         let curr_guards: HashSet<_> = curr.guards.iter().filter_map(|g| g.condition.clone()).collect();
-
         let guards_added: Vec<_> = curr_guards.difference(&base_guards).cloned().collect();
         let guards_removed: Vec<_> = base_guards.difference(&curr_guards).cloned().collect();
 
-        // Effects diff (DB writes, events emitted, external service calls)
-        let base_effects: HashSet<_> = Self::extract_effects(base);
-        let curr_effects: HashSet<_> = Self::extract_effects(curr);
+        // Reads diff
+        let base_reads: HashSet<_> = base.coupling.reads.iter().cloned().collect();
+        let curr_reads: HashSet<_> = curr.coupling.reads.iter().cloned().collect();
+        let reads_added: Vec<_> = curr_reads.difference(&base_reads).cloned().collect();
+        let reads_removed: Vec<_> = base_reads.difference(&curr_reads).cloned().collect();
 
-        let effects_added: Vec<_> = curr_effects.difference(&base_effects).cloned().collect();
-        let effects_removed: Vec<_> = base_effects.difference(&curr_effects).cloned().collect();
+        // Writes diff
+        let base_writes: HashSet<_> = base.coupling.writes.iter().cloned().collect();
+        let curr_writes: HashSet<_> = curr.coupling.writes.iter().cloned().collect();
+        let writes_added: Vec<_> = curr_writes.difference(&base_writes).cloned().collect();
+        let writes_removed: Vec<_> = base_writes.difference(&curr_writes).cloned().collect();
+
+        // Events published diff
+        let base_events: HashSet<_> = base.coupling.events_published.iter().cloned().collect();
+        let curr_events: HashSet<_> = curr.coupling.events_published.iter().cloned().collect();
+        let events_added: Vec<_> = curr_events.difference(&base_events).cloned().collect();
+        let events_removed: Vec<_> = base_events.difference(&curr_events).cloned().collect();
+
+        // Calls diff
+        let base_calls: HashSet<_> = Self::extract_calls(base);
+        let curr_calls: HashSet<_> = Self::extract_calls(curr);
+        let calls_added: Vec<_> = curr_calls.difference(&base_calls).cloned().collect();
+        let calls_removed: Vec<_> = base_calls.difference(&curr_calls).cloned().collect();
+
+        // Flags diff
+        let base_flags: HashSet<_> = Self::extract_flags(base);
+        let curr_flags: HashSet<_> = Self::extract_flags(curr);
+        let flags_added: Vec<_> = curr_flags.difference(&base_flags).cloned().collect();
+        let flags_removed: Vec<_> = base_flags.difference(&curr_flags).cloned().collect();
 
         // Outcomes diff
         let base_outcomes: HashSet<_> = Self::extract_outcomes(base);
         let curr_outcomes: HashSet<_> = Self::extract_outcomes(curr);
-
         let outcomes_added: Vec<_> = curr_outcomes.difference(&base_outcomes).cloned().collect();
         let outcomes_removed: Vec<_> = base_outcomes.difference(&curr_outcomes).cloned().collect();
 
@@ -255,25 +284,68 @@ impl FlowDiffer {
         FlowDelta {
             guards_added,
             guards_removed,
-            effects_added,
-            effects_removed,
+            reads_added,
+            reads_removed,
+            writes_added,
+            writes_removed,
+            events_added,
+            events_removed,
+            calls_added,
+            calls_removed,
+            flags_added,
+            flags_removed,
             outcomes_added,
             outcomes_removed,
             is_breaking,
         }
     }
 
-    fn extract_effects(flow: &Flow) -> HashSet<String> {
+    fn extract_calls(flow: &Flow) -> HashSet<String> {
         let mut set = HashSet::new();
-        for w in &flow.coupling.writes {
-            set.insert(format!("db_write: {}", w));
+        fn collect(steps: &[Step], set: &mut HashSet<String>) {
+            for s in steps {
+                if s.step_type == "call" {
+                    if let Some(sym) = &s.symbol {
+                        set.insert(sym.clone());
+                    }
+                }
+                if let Some(branches) = &s.branches {
+                    for b in branches {
+                        collect(&b.steps, set);
+                    }
+                }
+                if let Some(child_steps) = &s.steps {
+                    collect(child_steps, set);
+                }
+            }
         }
-        for e in &flow.coupling.events_published {
-            set.insert(format!("event: {}", e));
+        collect(&flow.steps, &mut set);
+        set
+    }
+
+    fn extract_flags(flow: &Flow) -> HashSet<String> {
+        let mut set = HashSet::new();
+        for c in &flow.configs_and_flags {
+            set.insert(c.name.clone());
         }
-        for s in &flow.coupling.calls_services {
-            set.insert(format!("service_call: {}", s));
+        fn collect(steps: &[Step], set: &mut HashSet<String>) {
+            for s in steps {
+                if s.step_type == "decision" && (s.kind.as_deref() == Some("feature_flag") || s.kind.as_deref() == Some("config")) {
+                    if let Some(cond) = &s.condition {
+                        set.insert(cond.clone());
+                    }
+                }
+                if let Some(branches) = &s.branches {
+                    for b in branches {
+                        collect(&b.steps, set);
+                    }
+                }
+                if let Some(child_steps) = &s.steps {
+                    collect(child_steps, set);
+                }
+            }
         }
+        collect(&flow.steps, &mut set);
         set
     }
 
@@ -354,11 +426,35 @@ impl FlowDiffer {
                 for g in &delta.guards_removed {
                     println!("      - guard removed: {}", g.bright_red());
                 }
-                for e in &delta.effects_added {
-                    println!("      + effect added:  {}", e.bright_green());
+                for r in &delta.reads_added {
+                    println!("      + table read:    {}", r.bright_green());
                 }
-                for e in &delta.effects_removed {
-                    println!("      - effect removed:{}", e.bright_red());
+                for r in &delta.reads_removed {
+                    println!("      - table read:    {}", r.bright_red());
+                }
+                for w in &delta.writes_added {
+                    println!("      + table write:   {}", w.bright_green());
+                }
+                for w in &delta.writes_removed {
+                    println!("      - table write:   {}", w.bright_red());
+                }
+                for e in &delta.events_added {
+                    println!("      + event pub:     {}", e.bright_green());
+                }
+                for e in &delta.events_removed {
+                    println!("      - event pub:     {}", e.bright_red());
+                }
+                for c in &delta.calls_added {
+                    println!("      + call added:    {}", c.bright_cyan());
+                }
+                for c in &delta.calls_removed {
+                    println!("      - call removed:  {}", c.bright_red());
+                }
+                for f in &delta.flags_added {
+                    println!("      + flag check:    {}", f.bright_magenta());
+                }
+                for f in &delta.flags_removed {
+                    println!("      - flag check:    {}", f.bright_red());
                 }
                 for o in &delta.outcomes_added {
                     println!("      + outcome added: {}", o.bright_green());
@@ -439,13 +535,49 @@ impl FlowDiffer {
                         md.push_str(&format!("- `- guard:` `{}`\n", g));
                     }
                 }
-                if !delta.effects_added.is_empty() || !delta.effects_removed.is_empty() {
-                    md.push_str("\n**Effects (State Mutations & Events):**\n");
-                    for e in &delta.effects_added {
-                        md.push_str(&format!("- `+ effect:` `{}`\n", e));
+                if !delta.reads_added.is_empty() || !delta.reads_removed.is_empty() {
+                    md.push_str("\n**Database Reads:**\n");
+                    for r in &delta.reads_added {
+                        md.push_str(&format!("- `+ table read:` `{}`\n", r));
                     }
-                    for e in &delta.effects_removed {
-                        md.push_str(&format!("- `- effect:` `{}`\n", e));
+                    for r in &delta.reads_removed {
+                        md.push_str(&format!("- `- table read:` `{}`\n", r));
+                    }
+                }
+                if !delta.writes_added.is_empty() || !delta.writes_removed.is_empty() {
+                    md.push_str("\n**Database Writes:**\n");
+                    for w in &delta.writes_added {
+                        md.push_str(&format!("- `+ table write:` `{}`\n", w));
+                    }
+                    for w in &delta.writes_removed {
+                        md.push_str(&format!("- `- table write:` `{}`\n", w));
+                    }
+                }
+                if !delta.events_added.is_empty() || !delta.events_removed.is_empty() {
+                    md.push_str("\n**Events Published:**\n");
+                    for e in &delta.events_added {
+                        md.push_str(&format!("- `+ event pub:` `{}`\n", e));
+                    }
+                    for e in &delta.events_removed {
+                        md.push_str(&format!("- `- event pub:` `{}`\n", e));
+                    }
+                }
+                if !delta.calls_added.is_empty() || !delta.calls_removed.is_empty() {
+                    md.push_str("\n**Method Calls:**\n");
+                    for c in &delta.calls_added {
+                        md.push_str(&format!("- `+ call:` `{}`\n", c));
+                    }
+                    for c in &delta.calls_removed {
+                        md.push_str(&format!("- `- call:` `{}`\n", c));
+                    }
+                }
+                if !delta.flags_added.is_empty() || !delta.flags_removed.is_empty() {
+                    md.push_str("\n**Feature Flags & Configs:**\n");
+                    for f in &delta.flags_added {
+                        md.push_str(&format!("- `+ flag check:` `{}`\n", f));
+                    }
+                    for f in &delta.flags_removed {
+                        md.push_str(&format!("- `- flag check:` `{}`\n", f));
                     }
                 }
                 if !delta.outcomes_added.is_empty() || !delta.outcomes_removed.is_empty() {
@@ -506,9 +638,105 @@ impl FlowDelta {
     pub fn has_changes(&self) -> bool {
         !self.guards_added.is_empty()
             || !self.guards_removed.is_empty()
-            || !self.effects_added.is_empty()
-            || !self.effects_removed.is_empty()
+            || !self.reads_added.is_empty()
+            || !self.reads_removed.is_empty()
+            || !self.writes_added.is_empty()
+            || !self.writes_removed.is_empty()
+            || !self.events_added.is_empty()
+            || !self.events_removed.is_empty()
+            || !self.calls_added.is_empty()
+            || !self.calls_removed.is_empty()
+            || !self.flags_added.is_empty()
+            || !self.flags_removed.is_empty()
             || !self.outcomes_added.is_empty()
             || !self.outcomes_removed.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_behavioral_diff_modified_flows_g11() {
+        let base_flow_json = r#"{
+            "id": "POST api/Orders",
+            "kind": "http",
+            "trigger": { "method": "POST", "path": "api/Orders" },
+            "handler": { "symbol": "OrdersController.Create", "file": "src/OrdersController.cs", "line": 20 },
+            "coupling": {
+                "reads": ["Orders"],
+                "writes": [],
+                "events_published": [],
+                "events_consumed": [],
+                "calls_services": []
+            },
+            "steps": []
+        }"#;
+
+        let curr_flow_json = r#"{
+            "id": "POST api/Orders",
+            "kind": "http",
+            "trigger": { "method": "POST", "path": "api/Orders" },
+            "handler": { "symbol": "OrdersController.Create", "file": "src/OrdersController.cs", "line": 20 },
+            "coupling": {
+                "reads": ["Orders"],
+                "writes": ["Orders"],
+                "events_published": ["OrderSubmittedDomainEvent"],
+                "events_consumed": [],
+                "calls_services": []
+            },
+            "steps": [
+                {
+                    "type": "call",
+                    "symbol": "Order.Submit",
+                    "file": "src/Domain/Order.cs"
+                }
+            ]
+        }"#;
+
+        let base_flow: Flow = serde_json::from_str(base_flow_json).unwrap();
+        let curr_flow: Flow = serde_json::from_str(curr_flow_json).unwrap();
+
+        let base_map = ConnectedFlowMap {
+            version: "1.0".to_string(),
+            generated_at: "v1".to_string(),
+            stats: FlowMapStats::default(),
+            domains: Default::default(),
+            flows: vec![base_flow],
+            entity_topology: Default::default(),
+            table_index: Default::default(),
+            event_index: Default::default(),
+            flag_index: Default::default(),
+            service_index: Default::default(),
+            annotations: Default::default(),
+        };
+
+        let curr_map = ConnectedFlowMap {
+            version: "1.0".to_string(),
+            generated_at: "v2".to_string(),
+            stats: FlowMapStats::default(),
+            domains: Default::default(),
+            flows: vec![curr_flow],
+            entity_topology: Default::default(),
+            table_index: Default::default(),
+            event_index: Default::default(),
+            flag_index: Default::default(),
+            service_index: Default::default(),
+            annotations: Default::default(),
+        };
+
+        let diff_report = FlowDiffer::diff(&base_map, &curr_map);
+
+        // G11: Must report the modified flow, not 0 changes!
+        assert_eq!(diff_report.flows_added.len(), 0);
+        assert_eq!(diff_report.flows_removed.len(), 0);
+        assert_eq!(diff_report.flows_modified.len(), 1);
+
+        let delta = diff_report.flows_modified.get("POST api/Orders").unwrap();
+        assert!(delta.has_changes());
+        assert_eq!(delta.writes_added, vec!["Orders"]);
+        assert_eq!(delta.events_added, vec!["OrderSubmittedDomainEvent"]);
+        assert_eq!(delta.calls_added, vec!["Order.Submit"]);
     }
 }
