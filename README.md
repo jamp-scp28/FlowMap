@@ -12,29 +12,29 @@
 
 ## Use Cases
 
-### Why I built FlowMap
+### Why I'm trying this
 
-FlowMap came out of a long iteration at work. I shipped a new feature, and a lot of issues showed up afterwards. Looking back, the root cause was clear: I was asking an AI agent to implement changes without it having the whole picture of the codebase. It saw the files I pointed it to, not the flows, side effects and services those files were connected to.
+This is an experiment, not a finished answer. It started after a long iteration at work: I shipped a new feature and a lot of issues showed up afterwards. My guess is that part of the problem was asking an AI agent to implement changes without it having the whole picture of the codebase. It saw the files I pointed it to, not the flows, side effects and services those files were connected to.
 
-There are probably existing tools that already cover parts of this, and you can get far by using Roslyn or your IDE's "find references" directly. FlowMap is my attempt to put that information into one map that both a human and an AI agent can read quickly. These are the ways I use it personally:
+There are probably better tools out there already, and you can likely get most of this by using Roslyn or your IDE's "find references" directly. I wanted to try putting that information into one map that both a human and an AI agent can read quickly, and see if it makes any difference. These are the ways I'm using it for now:
 
-1. **Keep up with AI-generated code.** AI writes code faster than most of us can review it. Even with a careful review, it's easy to lose track of how the features of a codebase interact. FlowMap turns those interactions (calls, database tables, events, consumers) into a visual map, so you can rebuild your mental model of the system much faster.
+1. **Understanding what the AI built.** AI writes code really fast, and reviewing a diff doesn't really tell you how your service works anymore. You approve the PR, but if someone asks "what happens when this endpoint gets called?", you're not sure. The map shows the interactions (what calls what, which tables get written, which events go out), so you can build a mental map and actually understand your own codebase again.
 
-2. **Prepare context before building a new feature.** Instead of hunting for the relevant files yourself, or asking the AI to "implement feature X" blindly, generate the flow maps first. The agent can then read the map, understand the relationships and the blast radius of its edits, and check its own work with `flowmap impact`, `flowmap delta` and `flowmap diff`.
+2. **Giving the AI the full picture before a new feature.** Instead of digging for the right files myself, or just telling the AI "add feature X" and hoping it finds everything, I generate the maps first and point the agent at them. That way it can see what's connected to what it's about to change, and it can use `flowmap impact`, `flowmap delta` and `flowmap diff` to check what its changes actually affect.
 
-3. **Features that span multiple codebases and repos.** When a change crosses service boundaries, ask the agent to evaluate the impact across several maps (`flowmap federate`). It can see which services publish and consume each event before it touches anything, and implement the change consistently on every side.
+3. **Changes that touch more than one repo.** This is where things broke for me before: a change in one service quietly affects another one. With `flowmap federate` I can ask the agent to look at the maps of all the repos involved, see who publishes and who consumes each event, and only then make the change on every side.
 
-4. **Onboarding.** Someone new to a codebase can open the map and get a working understanding of its main flows, data and events without reading every file first.
+4. **Getting into a codebase you don't know.** When you're new to a project, you can open the map and get a rough idea of the main flows before reading every file.
 
-5. **Reviewing pull requests.** `flowmap delta --against main --pr` produces a behavioral summary for the PR description: which flows changed, which outcomes were dropped, which guards were removed. Reviewers see the effect of a change, not only the lines.
+5. **Reviewing PRs.** `flowmap delta --against main --pr` gives a short summary of what behavior changed: flows that were added or removed, outcomes that disappeared, checks that got dropped. It's easier to review "what this does" than 40 changed files.
 
-6. **Architecture and safety checks.** The audit flags events nobody consumes, state mutations that happen before auth or validation, and unguarded endpoints. `flowmap delta --strict` can run as a CI gate to block breaking behavioral changes.
+6. **Catching the obvious stuff.** The audit points out things like events nobody listens to, writes to the database before auth or validation runs, and endpoints with no guard at all. You can also run `flowmap delta --strict` in CI to fail the build when something like that shows up.
 
-7. **Answering "what touches this?"** `flowmap query` tells you which flows write to a table, who publishes and consumes an event, or what is gated behind a feature flag. Useful when debugging, or before a schema change or flag cleanup.
+7. **"Wait, what else uses this?"** Before changing a table, an event or a feature flag, `flowmap query` tells you which flows touch it. Handy when debugging, or before cleaning up an old flag.
 
 ### The plan
 
-I'm going to use FlowMap in my day-to-day work and backtest it against real tasks to see whether it actually improves my process and the quality of what I deliver. If it helps, I'll keep using it and improving it. If it doesn't, I'll adapt it, or archive it. Either way, it was fun to build.
+I'm going to use this in my day-to-day work and test it against real tasks to see if it actually helps me deliver better work. If it does, I'll keep using it and improving it. If it doesn't, I'll adapt it or archive it. Either way, it was fun to build.
 
 > [!IMPORTANT]
 > **100% Local-First & Static Analysis Privacy Guarantee**
