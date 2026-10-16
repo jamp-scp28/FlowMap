@@ -8,6 +8,34 @@
 
 **FlowMap** is a high-precision, autonomous behavioral and architectural mapping engine for **C# (.NET / Roslyn)**, **Rust (syn AST / Diesel / Axum)**, and **Python (FastAPI / Starlette / Celery)** codebases.
 
+---
+
+## Use Cases
+
+### Why I built FlowMap
+
+FlowMap came out of a long iteration at work. I shipped a new feature, and a lot of issues showed up afterwards. Looking back, the root cause was clear: I was asking an AI agent to implement changes without it having the whole picture of the codebase. It saw the files I pointed it to, not the flows, side effects and services those files were connected to.
+
+There are probably existing tools that already cover parts of this, and you can get far by using Roslyn or your IDE's "find references" directly. FlowMap is my attempt to put that information into one map that both a human and an AI agent can read quickly. These are the ways I use it personally:
+
+1. **Keep up with AI-generated code.** AI writes code faster than most of us can review it. Even with a careful review, it's easy to lose track of how the features of a codebase interact. FlowMap turns those interactions (calls, database tables, events, consumers) into a visual map, so you can rebuild your mental model of the system much faster.
+
+2. **Prepare context before building a new feature.** Instead of hunting for the relevant files yourself, or asking the AI to "implement feature X" blindly, generate the flow maps first. The agent can then read the map, understand the relationships and the blast radius of its edits, and check its own work with `flowmap impact`, `flowmap delta` and `flowmap diff`.
+
+3. **Features that span multiple codebases and repos.** When a change crosses service boundaries, ask the agent to evaluate the impact across several maps (`flowmap federate`). It can see which services publish and consume each event before it touches anything, and implement the change consistently on every side.
+
+4. **Onboarding.** Someone new to a codebase can open the map and get a working understanding of its main flows, data and events without reading every file first.
+
+5. **Reviewing pull requests.** `flowmap delta --against main --pr` produces a behavioral summary for the PR description: which flows changed, which outcomes were dropped, which guards were removed. Reviewers see the effect of a change, not only the lines.
+
+6. **Architecture and safety checks.** The audit flags events nobody consumes, state mutations that happen before auth or validation, and unguarded endpoints. `flowmap delta --strict` can run as a CI gate to block breaking behavioral changes.
+
+7. **Answering "what touches this?"** `flowmap query` tells you which flows write to a table, who publishes and consumes an event, or what is gated behind a feature flag. Useful when debugging, or before a schema change or flag cleanup.
+
+### The plan
+
+I'm going to use FlowMap in my day-to-day work and backtest it against real tasks to see whether it actually improves my process and the quality of what I deliver. If it helps, I'll keep using it and improving it. If it doesn't, I'll adapt it, or archive it. Either way, it was fun to build.
+
 > [!IMPORTANT]
 > **100% Local-First & Static Analysis Privacy Guarantee**
 > FlowMap runs **entirely offline and locally on your machine**. It performs purely static AST analysis (using Roslyn for C# and Syn for Rust) without executing your code, without connecting to external servers, and without transmitting telemetry or source code to third parties.
